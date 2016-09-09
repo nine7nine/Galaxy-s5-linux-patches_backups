@@ -1,0 +1,1598 @@
+diff -Nur -X dontdiff a/crypto/ablkcipher.c b/crypto/ablkcipher.c
+--- a/crypto/ablkcipher.c	2016-06-09 16:36:34.027454000 -0400
++++ b/crypto/ablkcipher.c	2016-06-10 10:07:44.048975341 -0400
+@@ -398,9 +398,9 @@
+ {
+ 	struct crypto_report_blkcipher rblkcipher;
+ 
+-	snprintf(rblkcipher.type, CRYPTO_MAX_ALG_NAME, "%s", "ablkcipher");
+-	snprintf(rblkcipher.geniv, CRYPTO_MAX_ALG_NAME, "%s",
+-		 alg->cra_ablkcipher.geniv ?: "<default>");
++	strncpy(rblkcipher.type, "ablkcipher", sizeof(rblkcipher.type));
++	strncpy(rblkcipher.geniv, alg->cra_ablkcipher.geniv ?: "<default>",
++		sizeof(rblkcipher.geniv));
+ 
+ 	rblkcipher.blocksize = alg->cra_blocksize;
+ 	rblkcipher.min_keysize = alg->cra_ablkcipher.min_keysize;
+@@ -479,9 +479,9 @@
+ {
+ 	struct crypto_report_blkcipher rblkcipher;
+ 
+-	snprintf(rblkcipher.type, CRYPTO_MAX_ALG_NAME, "%s", "givcipher");
+-	snprintf(rblkcipher.geniv, CRYPTO_MAX_ALG_NAME, "%s",
+-		 alg->cra_ablkcipher.geniv ?: "<built-in>");
++	strncpy(rblkcipher.type, "givcipher", sizeof(rblkcipher.type));
++	strncpy(rblkcipher.geniv, alg->cra_ablkcipher.geniv ?: "<built-in>",
++		sizeof(rblkcipher.geniv));
+ 
+ 	rblkcipher.blocksize = alg->cra_blocksize;
+ 	rblkcipher.min_keysize = alg->cra_ablkcipher.min_keysize;
+diff -Nur -X dontdiff a/crypto/aead.c b/crypto/aead.c
+--- a/crypto/aead.c	2016-06-09 16:36:34.027454000 -0400
++++ b/crypto/aead.c	2016-06-10 10:07:44.048975341 -0400
+@@ -117,9 +117,8 @@
+ 	struct crypto_report_aead raead;
+ 	struct aead_alg *aead = &alg->cra_aead;
+ 
+-	snprintf(raead.type, CRYPTO_MAX_ALG_NAME, "%s", "aead");
+-	snprintf(raead.geniv, CRYPTO_MAX_ALG_NAME, "%s",
+-		 aead->geniv ?: "<built-in>");
++	strncpy(raead.type, "aead", sizeof(raead.type));
++	strncpy(raead.geniv, aead->geniv ?: "<built-in>", sizeof(raead.geniv));
+ 
+ 	raead.blocksize = alg->cra_blocksize;
+ 	raead.maxauthsize = aead->maxauthsize;
+@@ -203,8 +202,8 @@
+ 	struct crypto_report_aead raead;
+ 	struct aead_alg *aead = &alg->cra_aead;
+ 
+-	snprintf(raead.type, CRYPTO_MAX_ALG_NAME, "%s", "nivaead");
+-	snprintf(raead.geniv, CRYPTO_MAX_ALG_NAME, "%s", aead->geniv);
++	strncpy(raead.type, "nivaead", sizeof(raead.type));
++	strncpy(raead.geniv, aead->geniv, sizeof(raead.geniv));
+ 
+ 	raead.blocksize = alg->cra_blocksize;
+ 	raead.maxauthsize = aead->maxauthsize;
+diff -Nur -X dontdiff a/crypto/ahash.c b/crypto/ahash.c
+--- a/crypto/ahash.c	2016-06-09 16:36:34.027454000 -0400
++++ b/crypto/ahash.c	2016-06-10 10:07:44.049975361 -0400
+@@ -429,7 +429,7 @@
+ {
+ 	struct crypto_report_hash rhash;
+ 
+-	snprintf(rhash.type, CRYPTO_MAX_ALG_NAME, "%s", "ahash");
++	strncpy(rhash.type, "ahash", sizeof(rhash.type));
+ 
+ 	rhash.blocksize = alg->cra_blocksize;
+ 	rhash.digestsize = __crypto_hash_alg_common(alg)->digestsize;
+diff -Nur -X dontdiff a/crypto/blkcipher.c b/crypto/blkcipher.c
+--- a/crypto/blkcipher.c	2016-06-09 16:36:34.029454000 -0400
++++ b/crypto/blkcipher.c	2016-06-10 10:07:44.049975361 -0400
+@@ -518,9 +518,9 @@
+ {
+ 	struct crypto_report_blkcipher rblkcipher;
+ 
+-	snprintf(rblkcipher.type, CRYPTO_MAX_ALG_NAME, "%s", "blkcipher");
+-	snprintf(rblkcipher.geniv, CRYPTO_MAX_ALG_NAME, "%s",
+-		 alg->cra_blkcipher.geniv ?: "<default>");
++	strncpy(rblkcipher.type, "blkcipher", sizeof(rblkcipher.type));
++	strncpy(rblkcipher.geniv, alg->cra_blkcipher.geniv ?: "<default>",
++		sizeof(rblkcipher.geniv));
+ 
+ 	rblkcipher.blocksize = alg->cra_blocksize;
+ 	rblkcipher.min_keysize = alg->cra_blkcipher.min_keysize;
+diff -Nur -X dontdiff a/crypto/crypto_user.c b/crypto/crypto_user.c
+--- a/crypto/crypto_user.c	2016-06-09 16:36:34.030454000 -0400
++++ b/crypto/crypto_user.c	2016-06-10 10:07:44.049975361 -0400
+@@ -75,7 +75,7 @@
+ {
+ 	struct crypto_report_cipher rcipher;
+ 
+-	snprintf(rcipher.type, CRYPTO_MAX_ALG_NAME, "%s", "cipher");
++	strncpy(rcipher.type, "cipher", sizeof(rcipher.type));
+ 
+ 	rcipher.blocksize = alg->cra_blocksize;
+ 	rcipher.min_keysize = alg->cra_cipher.cia_min_keysize;
+@@ -94,8 +94,7 @@
+ {
+ 	struct crypto_report_comp rcomp;
+ 
+-	snprintf(rcomp.type, CRYPTO_MAX_ALG_NAME, "%s", "compression");
+-
++	strncpy(rcomp.type, "compression", sizeof(rcomp.type));
+ 	NLA_PUT(skb, CRYPTOCFGA_REPORT_COMPRESS,
+ 		sizeof(struct crypto_report_comp), &rcomp);
+ 
+@@ -108,12 +107,14 @@
+ static int crypto_report_one(struct crypto_alg *alg,
+ 			     struct crypto_user_alg *ualg, struct sk_buff *skb)
+ {
+-	memcpy(&ualg->cru_name, &alg->cra_name, sizeof(ualg->cru_name));
+-	memcpy(&ualg->cru_driver_name, &alg->cra_driver_name,
+-	       sizeof(ualg->cru_driver_name));
+-	memcpy(&ualg->cru_module_name, module_name(alg->cra_module),
+-	       CRYPTO_MAX_ALG_NAME);
++	strncpy(ualg->cru_name, alg->cra_name, sizeof(ualg->cru_name));
++	strncpy(ualg->cru_driver_name, alg->cra_driver_name,
++		sizeof(ualg->cru_driver_name));
++	strncpy(ualg->cru_module_name, module_name(alg->cra_module),
++		sizeof(ualg->cru_module_name));
+ 
++	ualg->cru_type = 0;
++	ualg->cru_mask = 0;
+ 	ualg->cru_flags = alg->cra_flags;
+ 	ualg->cru_refcnt = atomic_read(&alg->cra_refcnt);
+ 
+@@ -122,8 +123,7 @@
+ 	if (alg->cra_flags & CRYPTO_ALG_LARVAL) {
+ 		struct crypto_report_larval rl;
+ 
+-		snprintf(rl.type, CRYPTO_MAX_ALG_NAME, "%s", "larval");
+-
++		strncpy(rl.type, "larval", sizeof(rl.type));
+ 		NLA_PUT(skb, CRYPTOCFGA_REPORT_LARVAL,
+ 			sizeof(struct crypto_report_larval), &rl);
+ 
+diff -Nur -X dontdiff a/crypto/pcompress.c b/crypto/pcompress.c
+--- a/crypto/pcompress.c	2016-06-09 16:36:34.032454000 -0400
++++ b/crypto/pcompress.c	2016-06-10 10:07:44.049975361 -0400
+@@ -53,8 +53,7 @@
+ {
+ 	struct crypto_report_comp rpcomp;
+ 
+-	snprintf(rpcomp.type, CRYPTO_MAX_ALG_NAME, "%s", "pcomp");
+-
++	strncpy(rpcomp.type, "pcomp", sizeof(rpcomp.type));
+ 	NLA_PUT(skb, CRYPTOCFGA_REPORT_COMPRESS,
+ 		sizeof(struct crypto_report_comp), &rpcomp);
+ 
+diff -Nur -X dontdiff a/crypto/rng.c b/crypto/rng.c
+--- a/crypto/rng.c	2016-06-09 16:36:34.032454000 -0400
++++ b/crypto/rng.c	2016-06-10 10:07:44.049975361 -0400
+@@ -65,7 +65,7 @@
+ {
+ 	struct crypto_report_rng rrng;
+ 
+-	snprintf(rrng.type, CRYPTO_MAX_ALG_NAME, "%s", "rng");
++	strncpy(rrng.type, "rng", sizeof(rrng.type));
+ 
+ 	rrng.seedsize = alg->cra_rng.seedsize;
+ 
+diff -Nur -X dontdiff a/crypto/shash.c b/crypto/shash.c
+--- a/crypto/shash.c	2016-06-09 16:38:16.986527000 -0400
++++ b/crypto/shash.c	2016-06-10 10:07:44.049975361 -0400
+@@ -575,7 +575,8 @@
+ 	struct crypto_report_hash rhash;
+ 	struct shash_alg *salg = __crypto_shash_alg(alg);
+ 
+-	snprintf(rhash.type, CRYPTO_MAX_ALG_NAME, "%s", "shash");
++	strncpy(rhash.type, "shash", sizeof(rhash.type));
++
+ 	rhash.blocksize = alg->cra_blocksize;
+ 	rhash.digestsize = salg->digestsize;
+ 
+diff -Nur -X dontdiff a/drivers/connector/cn_proc.c b/drivers/connector/cn_proc.c
+--- a/drivers/connector/cn_proc.c	2016-06-09 16:36:34.125456000 -0400
++++ b/drivers/connector/cn_proc.c	2016-06-10 10:10:22.276067609 -0400
+@@ -64,6 +64,7 @@
+ 
+ 	msg = (struct cn_msg*)buffer;
+ 	ev = (struct proc_event*)msg->data;
++	memset(&ev->event_data, 0, sizeof(ev->event_data));
+ 	get_seq(&msg->seq, &ev->cpu);
+ 	ktime_get_ts(&ts); /* get high res monotonic timestamp */
+ 	put_unaligned(timespec_to_ns(&ts), (__u64 *)&ev->timestamp_ns);
+@@ -79,6 +80,7 @@
+ 	memcpy(&msg->id, &cn_proc_event_id, sizeof(msg->id));
+ 	msg->ack = 0; /* not used */
+ 	msg->len = sizeof(*ev);
++	msg->flags = 0; /* not used */
+ 	/*  If cn_netlink_send() failed, the data is not sent */
+ 	cn_netlink_send(msg, CN_IDX_PROC, GFP_KERNEL);
+ }
+@@ -95,6 +97,7 @@
+ 
+ 	msg = (struct cn_msg*)buffer;
+ 	ev = (struct proc_event*)msg->data;
++	memset(&ev->event_data, 0, sizeof(ev->event_data));
+ 	get_seq(&msg->seq, &ev->cpu);
+ 	ktime_get_ts(&ts); /* get high res monotonic timestamp */
+ 	put_unaligned(timespec_to_ns(&ts), (__u64 *)&ev->timestamp_ns);
+@@ -105,6 +108,7 @@
+ 	memcpy(&msg->id, &cn_proc_event_id, sizeof(msg->id));
+ 	msg->ack = 0; /* not used */
+ 	msg->len = sizeof(*ev);
++	msg->flags = 0; /* not used */
+ 	cn_netlink_send(msg, CN_IDX_PROC, GFP_KERNEL);
+ }
+ 
+@@ -121,6 +125,7 @@
+ 
+ 	msg = (struct cn_msg*)buffer;
+ 	ev = (struct proc_event*)msg->data;
++	memset(&ev->event_data, 0, sizeof(ev->event_data));
+ 	ev->what = which_id;
+ 	ev->event_data.id.process_pid = task->pid;
+ 	ev->event_data.id.process_tgid = task->tgid;
+@@ -144,6 +149,7 @@
+ 	memcpy(&msg->id, &cn_proc_event_id, sizeof(msg->id));
+ 	msg->ack = 0; /* not used */
+ 	msg->len = sizeof(*ev);
++	msg->flags = 0; /* not used */
+ 	cn_netlink_send(msg, CN_IDX_PROC, GFP_KERNEL);
+ }
+ 
+@@ -159,6 +165,7 @@
+ 
+ 	msg = (struct cn_msg *)buffer;
+ 	ev = (struct proc_event *)msg->data;
++	memset(&ev->event_data, 0, sizeof(ev->event_data));
+ 	get_seq(&msg->seq, &ev->cpu);
+ 	ktime_get_ts(&ts); /* get high res monotonic timestamp */
+ 	put_unaligned(timespec_to_ns(&ts), (__u64 *)&ev->timestamp_ns);
+@@ -169,6 +176,7 @@
+ 	memcpy(&msg->id, &cn_proc_event_id, sizeof(msg->id));
+ 	msg->ack = 0; /* not used */
+ 	msg->len = sizeof(*ev);
++	msg->flags = 0; /* not used */
+ 	cn_netlink_send(msg, CN_IDX_PROC, GFP_KERNEL);
+ }
+ 
+@@ -184,6 +192,7 @@
+ 
+ 	msg = (struct cn_msg *)buffer;
+ 	ev = (struct proc_event *)msg->data;
++	memset(&ev->event_data, 0, sizeof(ev->event_data));
+ 	get_seq(&msg->seq, &ev->cpu);
+ 	ktime_get_ts(&ts); /* get high res monotonic timestamp */
+ 	put_unaligned(timespec_to_ns(&ts), (__u64 *)&ev->timestamp_ns);
+@@ -202,6 +211,7 @@
+ 	memcpy(&msg->id, &cn_proc_event_id, sizeof(msg->id));
+ 	msg->ack = 0; /* not used */
+ 	msg->len = sizeof(*ev);
++	msg->flags = 0; /* not used */
+ 	cn_netlink_send(msg, CN_IDX_PROC, GFP_KERNEL);
+ }
+ 
+@@ -217,6 +227,7 @@
+ 
+ 	msg = (struct cn_msg *)buffer;
+ 	ev = (struct proc_event *)msg->data;
++	memset(&ev->event_data, 0, sizeof(ev->event_data));
+ 	get_seq(&msg->seq, &ev->cpu);
+ 	ktime_get_ts(&ts); /* get high res monotonic timestamp */
+ 	put_unaligned(timespec_to_ns(&ts), (__u64 *)&ev->timestamp_ns);
+@@ -228,6 +239,7 @@
+ 	memcpy(&msg->id, &cn_proc_event_id, sizeof(msg->id));
+ 	msg->ack = 0; /* not used */
+ 	msg->len = sizeof(*ev);
++	msg->flags = 0; /* not used */
+ 	cn_netlink_send(msg, CN_IDX_PROC, GFP_KERNEL);
+ }
+ 
+@@ -243,6 +255,7 @@
+ 
+ 	msg = (struct cn_msg*)buffer;
+ 	ev = (struct proc_event*)msg->data;
++	memset(&ev->event_data, 0, sizeof(ev->event_data));
+ 	get_seq(&msg->seq, &ev->cpu);
+ 	ktime_get_ts(&ts); /* get high res monotonic timestamp */
+ 	put_unaligned(timespec_to_ns(&ts), (__u64 *)&ev->timestamp_ns);
+@@ -255,6 +268,7 @@
+ 	memcpy(&msg->id, &cn_proc_event_id, sizeof(msg->id));
+ 	msg->ack = 0; /* not used */
+ 	msg->len = sizeof(*ev);
++	msg->flags = 0; /* not used */
+ 	cn_netlink_send(msg, CN_IDX_PROC, GFP_KERNEL);
+ }
+ 
+@@ -278,6 +292,7 @@
+ 
+ 	msg = (struct cn_msg*)buffer;
+ 	ev = (struct proc_event*)msg->data;
++	memset(&ev->event_data, 0, sizeof(ev->event_data));
+ 	msg->seq = rcvd_seq;
+ 	ktime_get_ts(&ts); /* get high res monotonic timestamp */
+ 	put_unaligned(timespec_to_ns(&ts), (__u64 *)&ev->timestamp_ns);
+@@ -287,6 +302,7 @@
+ 	memcpy(&msg->id, &cn_proc_event_id, sizeof(msg->id));
+ 	msg->ack = rcvd_ack + 1;
+ 	msg->len = sizeof(*ev);
++	msg->flags = 0; /* not used */
+ 	cn_netlink_send(msg, CN_IDX_PROC, GFP_KERNEL);
+ }
+ 
+diff -Nur -X dontdiff a/drivers/isdn/mISDN/socket.c b/drivers/isdn/mISDN/socket.c
+--- a/drivers/isdn/mISDN/socket.c	2016-06-09 16:36:34.449462000 -0400
++++ b/drivers/isdn/mISDN/socket.c	2016-06-10 17:32:25.894159927 -0400
+@@ -117,7 +117,6 @@
+ {
+ 	struct sk_buff		*skb;
+ 	struct sock		*sk = sock->sk;
+-	struct sockaddr_mISDN	*maddr;
+ 
+ 	int		copied, err;
+ 
+@@ -135,9 +134,9 @@
+ 	if (!skb)
+ 		return err;
+ 
+-	if (msg->msg_namelen >= sizeof(struct sockaddr_mISDN)) {
+-		msg->msg_namelen = sizeof(struct sockaddr_mISDN);
+-		maddr = (struct sockaddr_mISDN *)msg->msg_name;
++	if (msg->msg_name) {
++		struct sockaddr_mISDN *maddr = msg->msg_name;
++
+ 		maddr->family = AF_ISDN;
+ 		maddr->dev = _pms(sk)->dev->id;
+ 		if ((sk->sk_protocol == ISDN_P_LAPD_TE) ||
+@@ -150,11 +149,7 @@
+ 			maddr->sapi = _pms(sk)->ch.addr & 0xFF;
+ 			maddr->tei =  (_pms(sk)->ch.addr >> 8) & 0xFF;
+ 		}
+-	} else {
+-		if (msg->msg_namelen)
+-			printk(KERN_WARNING "%s: too small namelen %d\n",
+-			       __func__, msg->msg_namelen);
+-		msg->msg_namelen = 0;
++		msg->msg_namelen = sizeof(*maddr);
+ 	}
+ 
+ 	copied = skb->len + MISDN_HEADER_LEN;
+diff -Nur -X dontdiff a/drivers/net/ppp/pppoe.c b/drivers/net/ppp/pppoe.c
+--- a/drivers/net/ppp/pppoe.c	2016-06-09 16:36:34.887471000 -0400
++++ b/drivers/net/ppp/pppoe.c	2016-06-10 17:32:25.895159946 -0400
+@@ -985,8 +985,6 @@
+ 	if (error < 0)
+ 		goto end;
+ 
+-	m->msg_namelen = 0;
+-
+ 	if (skb) {
+ 		total_len = min_t(size_t, total_len, skb->len);
+ 		error = skb_copy_datagram_iovec(skb, 0, m->msg_iov, total_len);
+diff -Nur -X dontdiff a/drivers/net/wireless/b43/dma.c b/drivers/net/wireless/b43/dma.c
+--- a/drivers/net/wireless/b43/dma.c	2016-06-09 16:36:34.932472000 -0400
++++ b/drivers/net/wireless/b43/dma.c	2016-06-10 10:10:44.033491319 -0400
+@@ -409,7 +409,10 @@
+ 				struct b43_dmadesc_meta *meta)
+ {
+ 	if (meta->skb) {
+-		dev_kfree_skb_any(meta->skb);
++		if (ring->tx)
++			ieee80211_free_txskb(ring->dev->wl->hw, meta->skb);
++		else
++			dev_kfree_skb_any(meta->skb);
+ 		meta->skb = NULL;
+ 	}
+ }
+@@ -1454,7 +1457,7 @@
+ 	if (unlikely(err == -ENOKEY)) {
+ 		/* Drop this packet, as we don't have the encryption key
+ 		 * anymore and must not transmit it unencrypted. */
+-		dev_kfree_skb_any(skb);
++		ieee80211_free_txskb(dev->wl->hw, skb);
+ 		err = 0;
+ 		goto out;
+ 	}
+diff -Nur -X dontdiff a/drivers/net/wireless/b43/main.c b/drivers/net/wireless/b43/main.c
+--- a/drivers/net/wireless/b43/main.c	2016-06-09 16:36:34.933472000 -0400
++++ b/drivers/net/wireless/b43/main.c	2016-06-10 10:10:44.034491338 -0400
+@@ -3393,7 +3393,7 @@
+ 				break;
+ 			}
+ 			if (unlikely(err))
+-				dev_kfree_skb(skb); /* Drop it */
++				ieee80211_free_txskb(wl->hw, skb);
+ 			err = 0;
+ 		}
+ 
+@@ -3414,7 +3414,7 @@
+ 
+ 	if (unlikely(skb->len < 2 + 2 + 6)) {
+ 		/* Too short, this can't be a valid frame. */
+-		dev_kfree_skb_any(skb);
++		ieee80211_free_txskb(hw, skb);
+ 		return;
+ 	}
+ 	B43_WARN_ON(skb_shinfo(skb)->nr_frags);
+@@ -4210,8 +4210,12 @@
+ 
+ 	/* Drain all TX queues. */
+ 	for (queue_num = 0; queue_num < B43_QOS_QUEUE_NUM; queue_num++) {
+-		while (skb_queue_len(&wl->tx_queue[queue_num]))
+-			dev_kfree_skb(skb_dequeue(&wl->tx_queue[queue_num]));
++		while (skb_queue_len(&wl->tx_queue[queue_num])) {
++			struct sk_buff *skb;
++
++			skb = skb_dequeue(&wl->tx_queue[queue_num]);
++			ieee80211_free_txskb(wl->hw, skb);
++		}
+ 	}
+ 
+ 	b43_mac_suspend(dev);
+diff -Nur -X dontdiff a/drivers/net/wireless/b43/pio.c b/drivers/net/wireless/b43/pio.c
+--- a/drivers/net/wireless/b43/pio.c	2016-06-09 16:36:34.937472000 -0400
++++ b/drivers/net/wireless/b43/pio.c	2016-06-10 10:10:44.034491338 -0400
+@@ -196,7 +196,7 @@
+ 	for (i = 0; i < ARRAY_SIZE(q->packets); i++) {
+ 		pack = &(q->packets[i]);
+ 		if (pack->skb) {
+-			dev_kfree_skb_any(pack->skb);
++			ieee80211_free_txskb(q->dev->wl->hw, pack->skb);
+ 			pack->skb = NULL;
+ 		}
+ 	}
+@@ -552,7 +552,7 @@
+ 	if (unlikely(err == -ENOKEY)) {
+ 		/* Drop this packet, as we don't have the encryption key
+ 		 * anymore and must not transmit it unencrypted. */
+-		dev_kfree_skb_any(skb);
++		ieee80211_free_txskb(dev->wl->hw, skb);
+ 		err = 0;
+ 		goto out;
+ 	}
+diff -Nur -X dontdiff a/fs/binfmt_misc.c b/fs/binfmt_misc.c
+--- a/fs/binfmt_misc.c	2016-06-09 16:36:35.974493000 -0400
++++ b/fs/binfmt_misc.c	2016-06-10 10:04:02.025593891 -0400
+@@ -176,7 +176,10 @@
+ 		goto _error;
+ 	bprm->argc ++;
+ 
+-	bprm->interp = iname;	/* for binfmt_script */
++	/* Update interp in case binfmt_script needs it. */
++	retval = bprm_change_interp(iname, bprm);
++	if (retval < 0)
++		goto _error;
+ 
+ 	interp_file = open_exec (iname);
+ 	retval = PTR_ERR (interp_file);
+diff -Nur -X dontdiff a/fs/binfmt_script.c b/fs/binfmt_script.c
+--- a/fs/binfmt_script.c	2016-06-09 16:36:35.974493000 -0400
++++ b/fs/binfmt_script.c	2016-06-10 10:04:02.025593891 -0400
+@@ -82,7 +82,9 @@
+ 	retval = copy_strings_kernel(1, &i_name, bprm);
+ 	if (retval) return retval; 
+ 	bprm->argc++;
+-	bprm->interp = interp;
++	retval = bprm_change_interp(interp, bprm);
++	if (retval < 0)
++		return retval;
+ 
+ 	/*
+ 	 * OK, now restart the process with the interpreter's dentry.
+diff -Nur -X dontdiff a/fs/direct-io.c b/fs/direct-io.c
+--- a/fs/direct-io.c	2016-06-09 16:36:35.996493000 -0400
++++ b/fs/direct-io.c	2016-06-10 10:05:29.804333236 -0400
+@@ -305,9 +305,9 @@
+ 		dio->end_io(dio->iocb, offset, transferred,
+ 			    dio->private, ret, is_async);
+ 	} else {
++		inode_dio_done(dio->inode);
+ 		if (is_async)
+ 			aio_complete(dio->iocb, ret, 0);
+-		inode_dio_done(dio->inode);
+ 	}
+ 
+ 	return ret;
+diff -Nur -X dontdiff a/fs/exec.c b/fs/exec.c
+--- a/fs/exec.c	2016-06-09 16:38:17.006527000 -0400
++++ b/fs/exec.c	2016-06-10 10:04:02.025593891 -0400
+@@ -1208,9 +1208,24 @@
+ 		mutex_unlock(&current->signal->cred_guard_mutex);
+ 		abort_creds(bprm->cred);
+ 	}
++	/* If a binfmt changed the interp, free it. */
++	if (bprm->interp != bprm->filename)
++		kfree(bprm->interp);
+ 	kfree(bprm);
+ }
+ 
++int bprm_change_interp(char *interp, struct linux_binprm *bprm)
++{
++	/* If a binfmt changed the interp, free it first. */
++	if (bprm->interp != bprm->filename)
++		kfree(bprm->interp);
++	bprm->interp = kstrdup(interp, GFP_KERNEL);
++	if (!bprm->interp)
++		return -ENOMEM;
++	return 0;
++}
++EXPORT_SYMBOL(bprm_change_interp);
++
+ /*
+  * install the new credentials for this executable
+  */
+diff -Nur -X dontdiff a/fs/fifo.c b/fs/fifo.c
+--- a/fs/fifo.c	2016-06-09 16:36:36.018494000 -0400
++++ b/fs/fifo.c	2016-06-10 09:54:30.864880778 -0400
+@@ -14,7 +14,7 @@
+ #include <linux/sched.h>
+ #include <linux/pipe_fs_i.h>
+ 
+-static void wait_for_partner(struct inode* inode, unsigned int *cnt)
++static int wait_for_partner(struct inode* inode, unsigned int *cnt)
+ {
+ 	int cur = *cnt;	
+ 
+@@ -23,6 +23,7 @@
+ 		if (signal_pending(current))
+ 			break;
+ 	}
++	return cur == *cnt ? -ERESTARTSYS : 0;
+ }
+ 
+ static void wake_up_partner(struct inode* inode)
+@@ -67,8 +68,7 @@
+ 				 * seen a writer */
+ 				filp->f_version = pipe->w_counter;
+ 			} else {
+-				wait_for_partner(inode, &pipe->w_counter);
+-				if(signal_pending(current))
++				if (wait_for_partner(inode, &pipe->w_counter))
+ 					goto err_rd;
+ 			}
+ 		}
+@@ -90,8 +90,7 @@
+ 			wake_up_partner(inode);
+ 
+ 		if (!pipe->readers) {
+-			wait_for_partner(inode, &pipe->r_counter);
+-			if (signal_pending(current))
++			if (wait_for_partner(inode, &pipe->r_counter))
+ 				goto err_wr;
+ 		}
+ 		break;
+diff -Nur -X dontdiff a/fs/jbd2/transaction.c b/fs/jbd2/transaction.c
+--- a/fs/jbd2/transaction.c	2016-06-09 16:36:36.032494000 -0400
++++ b/fs/jbd2/transaction.c	2016-06-10 10:12:41.384771505 -0400
+@@ -1043,9 +1043,12 @@
+ void jbd2_journal_set_triggers(struct buffer_head *bh,
+ 			       struct jbd2_buffer_trigger_type *type)
+ {
+-	struct journal_head *jh = bh2jh(bh);
++	struct journal_head *jh = jbd2_journal_grab_journal_head(bh);
+ 
++	if (WARN_ON(!jh))
++		return;
+ 	jh->b_triggers = type;
++	jbd2_journal_put_journal_head(jh);
+ }
+ 
+ void jbd2_buffer_frozen_trigger(struct journal_head *jh, void *mapped_data,
+@@ -1097,17 +1100,18 @@
+ {
+ 	transaction_t *transaction = handle->h_transaction;
+ 	journal_t *journal = transaction->t_journal;
+-	struct journal_head *jh = bh2jh(bh);
++	struct journal_head *jh;
+ 	int ret = 0;
+ 
+-	jbd_debug(5, "journal_head %p\n", jh);
+-	JBUFFER_TRACE(jh, "entry");
+ 	if (is_handle_aborted(handle))
+ 		goto out;
+-	if (!buffer_jbd(bh)) {
++	jh = jbd2_journal_grab_journal_head(bh);
++	if (!jh) {
+ 		ret = -EUCLEAN;
+ 		goto out;
+ 	}
++	jbd_debug(5, "journal_head %p\n", jh);
++	JBUFFER_TRACE(jh, "entry");
+ 
+ 	jbd_lock_bh_state(bh);
+ 
+@@ -1198,6 +1202,7 @@
+ 	spin_unlock(&journal->j_list_lock);
+ out_unlock_bh:
+ 	jbd_unlock_bh_state(bh);
++	jbd2_journal_put_journal_head(jh);
+ out:
+ 	JBUFFER_TRACE(jh, "exit");
+ 	WARN_ON(ret);	/* All errors are bugs, so dump the stack */
+diff -Nur -X dontdiff a/fs/sysfs/dir.c b/fs/sysfs/dir.c
+--- a/fs/sysfs/dir.c	2016-06-09 16:36:36.101496000 -0400
++++ b/fs/sysfs/dir.c	2016-06-10 09:59:43.079388292 -0400
+@@ -457,20 +457,18 @@
+ /**
+  *	sysfs_pathname - return full path to sysfs dirent
+  *	@sd: sysfs_dirent whose path we want
+- *	@path: caller allocated buffer
++ *	@path: caller allocated buffer of size PATH_MAX
+  *
+  *	Gives the name "/" to the sysfs_root entry; any path returned
+  *	is relative to wherever sysfs is mounted.
+- *
+- *	XXX: does no error checking on @path size
+  */
+ static char *sysfs_pathname(struct sysfs_dirent *sd, char *path)
+ {
+ 	if (sd->s_parent) {
+ 		sysfs_pathname(sd->s_parent, path);
+-		strcat(path, "/");
++		strlcat(path, "/", PATH_MAX);
+ 	}
+-	strcat(path, sd->s_name);
++	strlcat(path, sd->s_name, PATH_MAX);
+ 	return path;
+ }
+ 
+@@ -503,9 +501,11 @@
+ 		char *path = kzalloc(PATH_MAX, GFP_KERNEL);
+ 		WARN(1, KERN_WARNING
+ 		     "sysfs: cannot create duplicate filename '%s'\n",
+-		     (path == NULL) ? sd->s_name :
+-		     strcat(strcat(sysfs_pathname(acxt->parent_sd, path), "/"),
+-		            sd->s_name));
++		     (path == NULL) ? sd->s_name
++				    : (sysfs_pathname(acxt->parent_sd, path),
++				       strlcat(path, "/", PATH_MAX),
++				       strlcat(path, sd->s_name, PATH_MAX),
++				       path));
+ 		kfree(path);
+ 	}
+ 
+diff -Nur -X dontdiff a/init/main.c b/init/main.c
+--- a/init/main.c	2016-06-09 16:36:36.336500000 -0400
++++ b/init/main.c	2016-06-10 09:43:29.140233571 -0400
+@@ -660,7 +660,7 @@
+ 	parse_early_param();
+ 	parse_args("Booting kernel", static_command_line, __start___param,
+ 		   __stop___param - __start___param,
+-		   0, 0, &unknown_bootoption);
++		   -1, -1, &unknown_bootoption);
+ 
+ 	jump_label_init();
+ 
+diff -Nur -X dontdiff a/ipc/sem.c b/ipc/sem.c
+--- a/ipc/sem.c	2016-06-09 16:36:36.337500000 -0400
++++ b/ipc/sem.c	2016-06-10 10:14:33.414941403 -0400
+@@ -1606,16 +1606,27 @@
+ 		rcu_read_lock();
+ 		un = list_entry_rcu(ulp->list_proc.next,
+ 				    struct sem_undo, list_proc);
+-		if (&un->list_proc == &ulp->list_proc)
+-			semid = -1;
+-		 else
+-			semid = un->semid;
++		if (&un->list_proc == &ulp->list_proc) {
++			/*
++			 * We must wait for freeary() before freeing this ulp,
++			 * in case we raced with last sem_undo. There is a small
++			 * possibility where we exit while freeary() didn't
++			 * finish unlocking sem_undo_list.
++			 */
++			spin_unlock_wait(&ulp->lock);
++			rcu_read_unlock();
++			break;
++		}
++		spin_lock(&ulp->lock);
++		semid = un->semid;
++		spin_unlock(&ulp->lock);
+ 		rcu_read_unlock();
+ 
++		/* exit_sem raced with IPC_RMID, nothing to do */
+ 		if (semid == -1)
+-			break;
++			continue;
+ 
+-		sma = sem_lock_check(tsk->nsproxy->ipc_ns, un->semid);
++		sma = sem_lock_check(tsk->nsproxy->ipc_ns, semid);
+ 
+ 		/* exit_sem raced with IPC_RMID, nothing to do */
+ 		if (IS_ERR(sma))
+diff -Nur -X dontdiff a/kernel/cgroup.c b/kernel/cgroup.c
+--- a/kernel/cgroup.c	2016-06-09 16:36:36.401502000 -0400
++++ b/kernel/cgroup.c	2016-06-10 17:30:28.453926132 -0400
+@@ -3847,6 +3847,11 @@
+ {
+ 	struct cgroup *c_parent = dentry->d_parent->d_fsdata;
+ 
++	/* Do not accept '\n' to prevent making /proc/<pid>/cgroup unparsable.
++	 */
++	if (strchr(dentry->d_name.name, '\n'))
++		return -EINVAL;
++
+ 	/* the vfs holds inode->i_mutex already */
+ 	return cgroup_create(c_parent, dentry, mode | S_IFDIR);
+ }
+diff -Nur -X dontdiff a/kernel/module.c b/kernel/module.c
+--- a/kernel/module.c	2016-06-09 16:36:36.416502000 -0400
++++ b/kernel/module.c	2016-06-10 09:43:37.746394695 -0400
+@@ -969,11 +969,15 @@
+ 	if (core_kernel_text(a))
+ 		return;
+ 
+-	/* module_text_address is safe here: we're supposed to have reference
+-	 * to module from symbol_get, so it can't go away. */
++	/*
++	 * Even though we hold a reference on the module; we still need to
++	 * disable preemption in order to safely traverse the data structure.
++	 */
++	preempt_disable();
+ 	modaddr = __module_text_address(a);
+ 	BUG_ON(!modaddr);
+ 	module_put(modaddr);
++	preempt_enable();
+ }
+ EXPORT_SYMBOL_GPL(symbol_put_addr);
+ 
+@@ -2355,12 +2359,17 @@
+ 	src = (void *)info->hdr + symsect->sh_offset;
+ 	nsrc = symsect->sh_size / sizeof(*src);
+ 
++	/* strtab always starts with a nul, so offset 0 is the empty string. */
++	strtab_size = 1;
++
+ 	/* Compute total space required for the core symbols' strtab. */
+-	for (ndst = i = strtab_size = 1; i < nsrc; ++i, ++src)
+-		if (is_core_symbol(src, info->sechdrs, info->hdr->e_shnum)) {
+-			strtab_size += strlen(&info->strtab[src->st_name]) + 1;
++	for (ndst = i = 0; i < nsrc; i++) {
++		if (i == 0 ||
++		    is_core_symbol(src+i, info->sechdrs, info->hdr->e_shnum)) {
++			strtab_size += strlen(&info->strtab[src[i].st_name])+1;
+ 			ndst++;
+ 		}
++	}
+ 
+ 	/* Append room for core symbols at end of core part. */
+ 	info->symoffs = ALIGN(mod->core_size, symsect->sh_addralign ?: 1);
+@@ -2394,15 +2403,15 @@
+ 	mod->core_symtab = dst = mod->module_core + info->symoffs;
+ 	mod->core_strtab = s = mod->module_core + info->stroffs;
+ 	src = mod->symtab;
+-	*dst = *src;
+ 	*s++ = 0;
+-	for (ndst = i = 1; i < mod->num_symtab; ++i, ++src) {
+-		if (!is_core_symbol(src, info->sechdrs, info->hdr->e_shnum))
+-			continue;
+-
+-		dst[ndst] = *src;
+-		dst[ndst++].st_name = s - mod->core_strtab;
+-		s += strlcpy(s, &mod->strtab[src->st_name], KSYM_NAME_LEN) + 1;
++	for (ndst = i = 0; i < mod->num_symtab; i++) {
++		if (i == 0 ||
++		    is_core_symbol(src+i, info->sechdrs, info->hdr->e_shnum)) {
++			dst[ndst] = src[i];
++			dst[ndst++].st_name = s - mod->core_strtab;
++			s += strlcpy(s, &mod->strtab[src[i].st_name],
++				     KSYM_NAME_LEN) + 1;
++		}
+ 	}
+ 	mod->core_num_syms = ndst;
+ }
+diff -Nur -X dontdiff a/kernel/trace/trace_events_filter.c b/kernel/trace/trace_events_filter.c
+--- a/kernel/trace/trace_events_filter.c	2016-06-09 16:36:36.433502000 -0400
++++ b/kernel/trace/trace_events_filter.c	2016-06-10 10:09:48.224403809 -0400
+@@ -777,7 +777,11 @@
+ 
+ static void __free_preds(struct event_filter *filter)
+ {
++	int i;
++
+ 	if (filter->preds) {
++		for (i = 0; i < filter->n_preds; i++)
++			kfree(filter->preds[i].ops);
+ 		kfree(filter->preds);
+ 		filter->preds = NULL;
+ 	}
+diff -Nur -X dontdiff a/mm/mempolicy.c b/mm/mempolicy.c
+--- a/mm/mempolicy.c	2016-06-09 16:36:36.450503000 -0400
++++ b/mm/mempolicy.c	2016-06-10 10:02:02.616209155 -0400
+@@ -1984,28 +1984,6 @@
+ 	return new;
+ }
+ 
+-/*
+- * If *frompol needs [has] an extra ref, copy *frompol to *tompol ,
+- * eliminate the * MPOL_F_* flags that require conditional ref and
+- * [NOTE!!!] drop the extra ref.  Not safe to reference *frompol directly
+- * after return.  Use the returned value.
+- *
+- * Allows use of a mempolicy for, e.g., multiple allocations with a single
+- * policy lookup, even if the policy needs/has extra ref on lookup.
+- * shmem_readahead needs this.
+- */
+-struct mempolicy *__mpol_cond_copy(struct mempolicy *tompol,
+-						struct mempolicy *frompol)
+-{
+-	if (!mpol_needs_cond_ref(frompol))
+-		return frompol;
+-
+-	*tompol = *frompol;
+-	tompol->flags &= ~MPOL_F_SHARED;	/* copy doesn't need unref */
+-	__mpol_put(frompol);
+-	return tompol;
+-}
+-
+ /* Slow path of a mempolicy comparison */
+ bool __mpol_equal(struct mempolicy *a, struct mempolicy *b)
+ {
+diff -Nur -X dontdiff a/mm/rmap.c b/mm/rmap.c
+--- a/mm/rmap.c	2016-06-09 16:38:16.994527000 -0400
++++ b/mm/rmap.c	2016-06-10 10:12:08.134126253 -0400
+@@ -1711,10 +1711,9 @@
+ {
+ 	struct anon_vma *root = anon_vma->root;
+ 
++	anon_vma_free(anon_vma);
+ 	if (root != anon_vma && atomic_dec_and_test(&root->refcount))
+ 		anon_vma_free(root);
+-
+-	anon_vma_free(anon_vma);
+ }
+ 
+ #ifdef CONFIG_MIGRATION
+diff -Nur -X dontdiff a/mm/shmem.c b/mm/shmem.c
+--- a/mm/shmem.c	2016-06-09 16:36:36.454503000 -0400
++++ b/mm/shmem.c	2016-06-10 10:02:02.617209175 -0400
+@@ -807,24 +807,28 @@
+ static struct page *shmem_swapin(swp_entry_t swap, gfp_t gfp,
+ 			struct shmem_inode_info *info, pgoff_t index)
+ {
+-	struct mempolicy mpol, *spol;
+ 	struct vm_area_struct pvma;
+-
+-	spol = mpol_cond_copy(&mpol,
+-			mpol_shared_policy_lookup(&info->policy, index));
++	struct page *page;
+ 
+ 	/* Create a pseudo vma that just contains the policy */
+ 	pvma.vm_start = 0;
+ 	pvma.vm_pgoff = index;
+ 	pvma.vm_ops = NULL;
+-	pvma.vm_policy = spol;
+-	return swapin_readahead(swap, gfp, &pvma, 0);
++	pvma.vm_policy = mpol_shared_policy_lookup(&info->policy, index);
++
++	page = swapin_readahead(swap, gfp, &pvma, 0);
++
++	/* Drop reference taken by mpol_shared_policy_lookup() */
++	mpol_cond_put(pvma.vm_policy);
++
++	return page;
+ }
+ 
+ static struct page *shmem_alloc_page(gfp_t gfp,
+ 			struct shmem_inode_info *info, pgoff_t index)
+ {
+ 	struct vm_area_struct pvma;
++	struct page *page;
+ 
+ 	/* Create a pseudo vma that just contains the policy */
+ 	pvma.vm_start = 0;
+@@ -832,10 +836,12 @@
+ 	pvma.vm_ops = NULL;
+ 	pvma.vm_policy = mpol_shared_policy_lookup(&info->policy, index);
+ 
+-	/*
+-	 * alloc_page_vma() will drop the shared policy reference
+-	 */
+-	return alloc_page_vma(gfp, &pvma, 0);
++	page = alloc_page_vma(gfp, &pvma, 0);
++
++	/* Drop reference taken by mpol_shared_policy_lookup() */
++	mpol_cond_put(pvma.vm_policy);
++
++	return page;
+ }
+ #else /* !CONFIG_NUMA */
+ #ifdef CONFIG_TMPFS
+diff -Nur -X dontdiff a/mm/vmscan.c b/mm/vmscan.c
+--- a/mm/vmscan.c	2016-06-09 16:36:36.457503000 -0400
++++ b/mm/vmscan.c	2016-06-10 09:51:32.378261000 -0400
+@@ -3321,14 +3321,17 @@
+ }
+ 
+ /*
+- * Called by memory hotplug when all memory in a node is offlined.
++ * Called by memory hotplug when all memory in a node is offlined.  Caller must
++ * hold lock_memory_hotplug().
+  */
+ void kswapd_stop(int nid)
+ {
+ 	struct task_struct *kswapd = NODE_DATA(nid)->kswapd;
+ 
+-	if (kswapd)
++	if (kswapd) {
+ 		kthread_stop(kswapd);
++		NODE_DATA(nid)->kswapd = NULL;
++	}
+ }
+ 
+ static int __init kswapd_init(void)
+diff -Nur -X dontdiff a/net/appletalk/ddp.c b/net/appletalk/ddp.c
+--- a/net/appletalk/ddp.c	2016-06-09 16:36:36.460503000 -0400
++++ b/net/appletalk/ddp.c	2016-06-10 17:32:25.895159946 -0400
+@@ -1740,7 +1740,6 @@
+ 			 size_t size, int flags)
+ {
+ 	struct sock *sk = sock->sk;
+-	struct sockaddr_at *sat = (struct sockaddr_at *)msg->msg_name;
+ 	struct ddpehdr *ddp;
+ 	int copied = 0;
+ 	int offset = 0;
+@@ -1769,14 +1768,13 @@
+ 	}
+ 	err = skb_copy_datagram_iovec(skb, offset, msg->msg_iov, copied);
+ 
+-	if (!err) {
+-		if (sat) {
+-			sat->sat_family      = AF_APPLETALK;
+-			sat->sat_port        = ddp->deh_sport;
+-			sat->sat_addr.s_node = ddp->deh_snode;
+-			sat->sat_addr.s_net  = ddp->deh_snet;
+-		}
+-		msg->msg_namelen = sizeof(*sat);
++	if (!err && msg->msg_name) {
++		struct sockaddr_at *sat = msg->msg_name;
++		sat->sat_family      = AF_APPLETALK;
++		sat->sat_port        = ddp->deh_sport;
++		sat->sat_addr.s_node = ddp->deh_snode;
++		sat->sat_addr.s_net  = ddp->deh_snet;
++		msg->msg_namelen     = sizeof(*sat);
+ 	}
+ 
+ 	skb_free_datagram(sk, skb);	/* Free the datagram. */
+diff -Nur -X dontdiff a/net/ax25/af_ax25.c b/net/ax25/af_ax25.c
+--- a/net/ax25/af_ax25.c	2016-06-09 16:36:36.462503000 -0400
++++ b/net/ax25/af_ax25.c	2016-06-10 17:32:25.895159946 -0400
+@@ -1643,11 +1643,11 @@
+ 
+ 	skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
+ 
+-	if (msg->msg_namelen != 0) {
+-		struct sockaddr_ax25 *sax = (struct sockaddr_ax25 *)msg->msg_name;
++	if (msg->msg_name) {
+ 		ax25_digi digi;
+ 		ax25_address src;
+ 		const unsigned char *mac = skb_mac_header(skb);
++		struct sockaddr_ax25 *sax = msg->msg_name;
+ 
+ 		ax25_addr_parse(mac + 1, skb->data - mac - 1, &src, NULL,
+ 				&digi, NULL, NULL);
+diff -Nur -X dontdiff a/net/bluetooth/af_bluetooth.c b/net/bluetooth/af_bluetooth.c
+--- a/net/bluetooth/af_bluetooth.c	2016-06-09 16:36:36.466503000 -0400
++++ b/net/bluetooth/af_bluetooth.c	2016-06-10 17:32:25.895159946 -0400
+@@ -283,8 +283,6 @@
+ 	if (flags & (MSG_OOB))
+ 		return -EOPNOTSUPP;
+ 
+-	msg->msg_namelen = 0;
+-
+ 	skb = skb_recv_datagram(sk, flags, noblock, &err);
+ 	if (!skb) {
+ 		if (sk->sk_shutdown & RCV_SHUTDOWN)
+@@ -349,8 +347,6 @@
+ 	if (flags & MSG_OOB)
+ 		return -EOPNOTSUPP;
+ 
+-	msg->msg_namelen = 0;
+-
+ 	BT_DBG("sk %p size %zu", sk, size);
+ 
+ 	lock_sock(sk);
+diff -Nur -X dontdiff a/net/bluetooth/hci_sock.c b/net/bluetooth/hci_sock.c
+--- a/net/bluetooth/hci_sock.c	2016-06-09 16:36:36.468503000 -0400
++++ b/net/bluetooth/hci_sock.c	2016-06-10 17:32:25.896159965 -0400
+@@ -500,8 +500,6 @@
+ 	if (!skb)
+ 		return err;
+ 
+-	msg->msg_namelen = 0;
+-
+ 	copied = skb->len;
+ 	if (len < copied) {
+ 		msg->msg_flags |= MSG_TRUNC;
+diff -Nur -X dontdiff a/net/compat.c b/net/compat.c
+--- a/net/compat.c	2016-06-09 16:36:36.477503000 -0400
++++ b/net/compat.c	2016-06-10 17:54:24.516138149 -0400
+@@ -71,6 +71,8 @@
+ 	    __get_user(kmsg->msg_controllen, &umsg->msg_controllen) ||
+ 	    __get_user(kmsg->msg_flags, &umsg->msg_flags))
+ 		return -EFAULT;
++	if (kmsg->msg_namelen > sizeof(struct sockaddr_storage))
++		return -EINVAL;
+ 	kmsg->msg_name = compat_ptr(tmp1);
+ 	kmsg->msg_iov = compat_ptr(tmp2);
+ 	kmsg->msg_control = compat_ptr(tmp3);
+@@ -91,7 +93,8 @@
+ 			if (err < 0)
+ 				return err;
+ 		}
+-		kern_msg->msg_name = kern_address;
++		if (kern_msg->msg_name)
++			kern_msg->msg_name = kern_address;
+ 	} else
+ 		kern_msg->msg_name = NULL;
+ 
+diff -Nur -X dontdiff a/net/core/iovec.c b/net/core/iovec.c
+--- a/net/core/iovec.c	2016-06-09 16:36:36.478503000 -0400
++++ b/net/core/iovec.c	2016-06-10 17:32:25.897159984 -0400
+@@ -48,7 +48,8 @@
+ 			if (err < 0)
+ 				return err;
+ 		}
+-		m->msg_name = address;
++		if (m->msg_name)
++			m->msg_name = address;
+ 	} else {
+ 		m->msg_name = NULL;
+ 	}
+diff -Nur -X dontdiff a/net/ipx/af_ipx.c b/net/ipx/af_ipx.c
+--- a/net/ipx/af_ipx.c	2016-06-09 16:36:36.509504000 -0400
++++ b/net/ipx/af_ipx.c	2016-06-10 17:32:25.897159984 -0400
+@@ -1835,8 +1835,6 @@
+ 	if (skb->tstamp.tv64)
+ 		sk->sk_stamp = skb->tstamp;
+ 
+-	msg->msg_namelen = sizeof(*sipx);
+-
+ 	if (sipx) {
+ 		sipx->sipx_family	= AF_IPX;
+ 		sipx->sipx_port		= ipx->ipx_source.sock;
+@@ -1844,6 +1842,7 @@
+ 		sipx->sipx_network	= IPX_SKB_CB(skb)->ipx_source_net;
+ 		sipx->sipx_type 	= ipx->ipx_type;
+ 		sipx->sipx_zero		= 0;
++		msg->msg_namelen	= sizeof(*sipx);
+ 	}
+ 	rc = copied;
+ 
+diff -Nur -X dontdiff a/net/key/af_key.c b/net/key/af_key.c
+--- a/net/key/af_key.c	2016-06-09 16:36:36.515504000 -0400
++++ b/net/key/af_key.c	2016-06-10 17:32:25.898160003 -0400
+@@ -1705,6 +1705,7 @@
+ 	hdr->sadb_msg_version = PF_KEY_V2;
+ 	hdr->sadb_msg_errno = (uint8_t) 0;
+ 	hdr->sadb_msg_len = (sizeof(struct sadb_msg) / sizeof(uint64_t));
++	hdr->sadb_msg_reserved = 0;
+ 
+ 	pfkey_broadcast(skb, GFP_ATOMIC, BROADCAST_ALL, NULL, c->net);
+ 
+@@ -2072,6 +2073,7 @@
+ 			pol->sadb_x_policy_type = IPSEC_POLICY_NONE;
+ 	}
+ 	pol->sadb_x_policy_dir = dir+1;
++	pol->sadb_x_policy_reserved = 0;
+ 	pol->sadb_x_policy_id = xp->index;
+ 	pol->sadb_x_policy_priority = xp->priority;
+ 
+@@ -2686,6 +2688,7 @@
+ 	hdr->sadb_msg_version = PF_KEY_V2;
+ 	hdr->sadb_msg_errno = (uint8_t) 0;
+ 	hdr->sadb_msg_len = (sizeof(struct sadb_msg) / sizeof(uint64_t));
++	hdr->sadb_msg_reserved = 0;
+ 	pfkey_broadcast(skb_out, GFP_ATOMIC, BROADCAST_ALL, NULL, c->net);
+ 	return 0;
+ 
+@@ -3106,7 +3109,9 @@
+ 	pol->sadb_x_policy_exttype = SADB_X_EXT_POLICY;
+ 	pol->sadb_x_policy_type = IPSEC_POLICY_IPSEC;
+ 	pol->sadb_x_policy_dir = dir+1;
++	pol->sadb_x_policy_reserved = 0;
+ 	pol->sadb_x_policy_id = xp->index;
++	pol->sadb_x_policy_priority = xp->priority;
+ 
+ 	/* Set sadb_comb's. */
+ 	if (x->id.proto == IPPROTO_AH)
+@@ -3494,6 +3499,7 @@
+ 	pol->sadb_x_policy_exttype = SADB_X_EXT_POLICY;
+ 	pol->sadb_x_policy_type = IPSEC_POLICY_IPSEC;
+ 	pol->sadb_x_policy_dir = dir + 1;
++	pol->sadb_x_policy_reserved = 0;
+ 	pol->sadb_x_policy_id = 0;
+ 	pol->sadb_x_policy_priority = 0;
+ 
+@@ -3588,7 +3594,6 @@
+ 	if (flags & ~(MSG_PEEK|MSG_DONTWAIT|MSG_TRUNC|MSG_CMSG_COMPAT))
+ 		goto out;
+ 
+-	msg->msg_namelen = 0;
+ 	skb = skb_recv_datagram(sk, flags, flags & MSG_DONTWAIT, &err);
+ 	if (skb == NULL)
+ 		goto out;
+diff -Nur -X dontdiff a/net/l2tp/l2tp_ppp.c b/net/l2tp/l2tp_ppp.c
+--- a/net/l2tp/l2tp_ppp.c	2016-06-09 16:36:36.516504000 -0400
++++ b/net/l2tp/l2tp_ppp.c	2016-06-10 17:32:25.898160003 -0400
+@@ -200,8 +200,6 @@
+ 	if (sk->sk_state & PPPOX_BOUND)
+ 		goto end;
+ 
+-	msg->msg_namelen = 0;
+-
+ 	err = 0;
+ 	skb = skb_recv_datagram(sk, flags & ~MSG_DONTWAIT,
+ 				flags & MSG_DONTWAIT, &err);
+diff -Nur -X dontdiff a/net/netlink/af_netlink.c b/net/netlink/af_netlink.c
+--- a/net/netlink/af_netlink.c	2016-06-09 16:36:36.537504000 -0400
++++ b/net/netlink/af_netlink.c	2016-06-10 17:32:25.898160003 -0400
+@@ -1444,8 +1444,6 @@
+ 	}
+ #endif
+ 
+-	msg->msg_namelen = 0;
+-
+ 	copied = data_skb->len;
+ 	if (len < copied) {
+ 		msg->msg_flags |= MSG_TRUNC;
+diff -Nur -X dontdiff a/net/netrom/af_netrom.c b/net/netrom/af_netrom.c
+--- a/net/netrom/af_netrom.c	2016-06-09 16:36:36.537504000 -0400
++++ b/net/netrom/af_netrom.c	2016-06-10 17:32:25.899160022 -0400
+@@ -1175,10 +1175,9 @@
+ 		sax->sax25_family = AF_NETROM;
+ 		skb_copy_from_linear_data_offset(skb, 7, sax->sax25_call.ax25_call,
+ 			      AX25_ADDR_LEN);
++		msg->msg_namelen = sizeof(*sax);
+ 	}
+ 
+-	msg->msg_namelen = sizeof(*sax);
+-
+ 	skb_free_datagram(sk, skb);
+ 
+ 	release_sock(sk);
+diff -Nur -X dontdiff a/net/nfc/rawsock.c b/net/nfc/rawsock.c
+--- a/net/nfc/rawsock.c	2016-06-09 16:36:36.538504000 -0400
++++ b/net/nfc/rawsock.c	2016-06-10 17:32:25.899160022 -0400
+@@ -232,8 +232,6 @@
+ 	if (!skb)
+ 		return rc;
+ 
+-	msg->msg_namelen = 0;
+-
+ 	copied = skb->len;
+ 	if (len < copied) {
+ 		msg->msg_flags |= MSG_TRUNC;
+diff -Nur -X dontdiff a/net/packet/af_packet.c b/net/packet/af_packet.c
+--- a/net/packet/af_packet.c	2016-06-09 16:36:36.540504000 -0400
++++ b/net/packet/af_packet.c	2016-06-10 17:32:25.899160022 -0400
+@@ -294,6 +294,7 @@
+ 	unsigned int		tp_reserve;
+ 	unsigned int		tp_loss:1;
+ 	unsigned int		tp_tstamp;
++	struct net_device __rcu	*cached_dev;
+ 	struct packet_type	prot_hook ____cacheline_aligned_in_smp;
+ };
+ 
+@@ -349,11 +350,15 @@
+ static void register_prot_hook(struct sock *sk)
+ {
+ 	struct packet_sock *po = pkt_sk(sk);
++
+ 	if (!po->running) {
+-		if (po->fanout)
++		if (po->fanout) {
+ 			__fanout_link(sk, po);
+-		else
++		} else {
+ 			dev_add_pack(&po->prot_hook);
++			rcu_assign_pointer(po->cached_dev, po->prot_hook.dev);
++		}
++
+ 		sock_hold(sk);
+ 		po->running = 1;
+ 	}
+@@ -371,10 +376,13 @@
+ 	struct packet_sock *po = pkt_sk(sk);
+ 
+ 	po->running = 0;
+-	if (po->fanout)
++	if (po->fanout) {
+ 		__fanout_unlink(sk, po);
+-	else
++	} else {
+ 		__dev_remove_pack(&po->prot_hook);
++		RCU_INIT_POINTER(po->cached_dev, NULL);
++	}
++
+ 	__sock_put(sk);
+ 
+ 	if (sync) {
+@@ -2050,12 +2058,24 @@
+ 	return tp_len;
+ }
+ 
++static struct net_device *packet_cached_dev_get(struct packet_sock *po)
++{
++	struct net_device *dev;
++
++	rcu_read_lock();
++	dev = rcu_dereference(po->cached_dev);
++	if (dev)
++		dev_hold(dev);
++	rcu_read_unlock();
++
++	return dev;
++}
++
+ static int tpacket_snd(struct packet_sock *po, struct msghdr *msg)
+ {
+ 	struct sk_buff *skb;
+ 	struct net_device *dev;
+ 	__be16 proto;
+-	bool need_rls_dev = false;
+ 	int err, reserve = 0;
+ 	void *ph;
+ 	struct sockaddr_ll *saddr = (struct sockaddr_ll *)msg->msg_name;
+@@ -2069,7 +2089,7 @@
+ 
+ 	err = -EBUSY;
+ 	if (saddr == NULL) {
+-		dev = po->prot_hook.dev;
++		dev	= packet_cached_dev_get(po);
+ 		proto	= po->num;
+ 		addr	= NULL;
+ 	} else {
+@@ -2083,19 +2103,17 @@
+ 		proto	= saddr->sll_protocol;
+ 		addr	= saddr->sll_addr;
+ 		dev = dev_get_by_index(sock_net(&po->sk), saddr->sll_ifindex);
+-		need_rls_dev = true;
+ 	}
+ 
+ 	err = -ENXIO;
+ 	if (unlikely(dev == NULL))
+ 		goto out;
+-
+-	reserve = dev->hard_header_len;
+-
+ 	err = -ENETDOWN;
+ 	if (unlikely(!(dev->flags & IFF_UP)))
+ 		goto out_put;
+ 
++	reserve = dev->hard_header_len;
++
+ 	size_max = po->tx_ring.frame_size
+ 		- (po->tp_hdrlen - sizeof(struct sockaddr_ll));
+ 
+@@ -2172,8 +2190,7 @@
+ 	__packet_set_status(po, ph, status);
+ 	kfree_skb(skb);
+ out_put:
+-	if (need_rls_dev)
+-		dev_put(dev);
++	dev_put(dev);
+ out:
+ 	mutex_unlock(&po->pg_vec_lock);
+ 	return err;
+@@ -2211,7 +2228,6 @@
+ 	struct sk_buff *skb;
+ 	struct net_device *dev;
+ 	__be16 proto;
+-	bool need_rls_dev = false;
+ 	unsigned char *addr;
+ 	int err, reserve = 0;
+ 	struct virtio_net_hdr vnet_hdr = { 0 };
+@@ -2227,7 +2243,7 @@
+ 	 */
+ 
+ 	if (saddr == NULL) {
+-		dev = po->prot_hook.dev;
++		dev	= packet_cached_dev_get(po);
+ 		proto	= po->num;
+ 		addr	= NULL;
+ 	} else {
+@@ -2239,19 +2255,17 @@
+ 		proto	= saddr->sll_protocol;
+ 		addr	= saddr->sll_addr;
+ 		dev = dev_get_by_index(sock_net(sk), saddr->sll_ifindex);
+-		need_rls_dev = true;
+ 	}
+ 
+ 	err = -ENXIO;
+-	if (dev == NULL)
++	if (unlikely(dev == NULL))
+ 		goto out_unlock;
+-	if (sock->type == SOCK_RAW)
+-		reserve = dev->hard_header_len;
+-
+ 	err = -ENETDOWN;
+-	if (!(dev->flags & IFF_UP))
++	if (unlikely(!(dev->flags & IFF_UP)))
+ 		goto out_unlock;
+ 
++	if (sock->type == SOCK_RAW)
++		reserve = dev->hard_header_len;
+ 	if (po->has_vnet_hdr) {
+ 		vnet_hdr_len = sizeof(vnet_hdr);
+ 
+@@ -2384,15 +2398,14 @@
+ 	if (err > 0 && (err = net_xmit_errno(err)) != 0)
+ 		goto out_unlock;
+ 
+-	if (need_rls_dev)
+-		dev_put(dev);
++	dev_put(dev);
+ 
+ 	return len;
+ 
+ out_free:
+ 	kfree_skb(skb);
+ out_unlock:
+-	if (dev && need_rls_dev)
++	if (dev)
+ 		dev_put(dev);
+ out:
+ 	return err;
+@@ -2607,6 +2620,7 @@
+ 	po = pkt_sk(sk);
+ 	sk->sk_family = PF_PACKET;
+ 	po->num = proto;
++	RCU_INIT_POINTER(po->cached_dev, NULL);
+ 
+ 	sk->sk_destruct = packet_sock_destruct;
+ 	sk_refcnt_debug_inc(sk);
+@@ -2695,7 +2709,6 @@
+ 	struct sock *sk = sock->sk;
+ 	struct sk_buff *skb;
+ 	int copied, err;
+-	struct sockaddr_ll *sll;
+ 	int vnet_hdr_len = 0;
+ 
+ 	err = -EINVAL;
+@@ -2778,22 +2791,10 @@
+ 			goto out_free;
+ 	}
+ 
+-	/*
+-	 *	If the address length field is there to be filled in, we fill
+-	 *	it in now.
++	/* You lose any data beyond the buffer you gave. If it worries
++	 * a user program they can ask the device for its MTU
++	 * anyway.
+ 	 */
+-
+-	sll = &PACKET_SKB_CB(skb)->sa.ll;
+-	if (sock->type == SOCK_PACKET)
+-		msg->msg_namelen = sizeof(struct sockaddr_pkt);
+-	else
+-		msg->msg_namelen = sll->sll_halen + offsetof(struct sockaddr_ll, sll_addr);
+-
+-	/*
+-	 *	You lose any data beyond the buffer you gave. If it worries a
+-	 *	user program they can ask the device for its MTU anyway.
+-	 */
+-
+ 	copied = skb->len;
+ 	if (copied > len) {
+ 		copied = len;
+@@ -2806,9 +2807,20 @@
+ 
+ 	sock_recv_ts_and_drops(msg, sk, skb);
+ 
+-	if (msg->msg_name)
++	if (msg->msg_name) {
++		/* If the address length field is there to be filled
++		 * in, we fill it in now.
++		 */
++		if (sock->type == SOCK_PACKET) {
++			msg->msg_namelen = sizeof(struct sockaddr_pkt);
++		} else {
++			struct sockaddr_ll *sll = &PACKET_SKB_CB(skb)->sa.ll;
++			msg->msg_namelen = sll->sll_halen +
++				offsetof(struct sockaddr_ll, sll_addr);
++		}
+ 		memcpy(msg->msg_name, &PACKET_SKB_CB(skb)->sa,
+ 		       msg->msg_namelen);
++	}
+ 
+ 	if (pkt_sk(sk)->auxdata) {
+ 		struct tpacket_auxdata aux;
+diff -Nur -X dontdiff a/net/rds/recv.c b/net/rds/recv.c
+--- a/net/rds/recv.c	2016-06-09 16:36:36.543505000 -0400
++++ b/net/rds/recv.c	2016-06-10 17:32:25.899160022 -0400
+@@ -410,8 +410,6 @@
+ 
+ 	rdsdebug("size %zu flags 0x%x timeo %ld\n", size, msg_flags, timeo);
+ 
+-	msg->msg_namelen = 0;
+-
+ 	if (msg_flags & MSG_OOB)
+ 		goto out;
+ 
+diff -Nur -X dontdiff a/net/rose/af_rose.c b/net/rose/af_rose.c
+--- a/net/rose/af_rose.c	2016-06-09 16:36:36.544505000 -0400
++++ b/net/rose/af_rose.c	2016-06-10 17:34:32.019551873 -0400
+@@ -1220,7 +1220,6 @@
+ {
+ 	struct sock *sk = sock->sk;
+ 	struct rose_sock *rose = rose_sk(sk);
+-	struct sockaddr_rose *srose = (struct sockaddr_rose *)msg->msg_name;
+ 	size_t copied;
+ 	unsigned char *asmptr;
+ 	struct sk_buff *skb;
+@@ -1256,7 +1255,11 @@
+ 
+ 	skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
+ 
+-	if (srose != NULL) {
++	if (msg->msg_name) {
++		struct sockaddr_rose *srose;
++
++		memset(msg->msg_name, 0, sizeof(struct full_sockaddr_rose));
++		srose = msg->msg_name;
+ 		srose->srose_family = AF_ROSE;
+ 		srose->srose_addr   = rose->dest_addr;
+ 		srose->srose_call   = rose->dest_call;
+diff -Nur -X dontdiff a/net/rxrpc/ar-recvmsg.c b/net/rxrpc/ar-recvmsg.c
+--- a/net/rxrpc/ar-recvmsg.c	2016-06-09 16:36:36.545505000 -0400
++++ b/net/rxrpc/ar-recvmsg.c	2016-06-10 17:32:25.900160041 -0400
+@@ -143,10 +143,13 @@
+ 
+ 		/* copy the peer address and timestamp */
+ 		if (!continue_call) {
+-			if (msg->msg_name && msg->msg_namelen > 0)
++			if (msg->msg_name) {
++				size_t len =
++					sizeof(call->conn->trans->peer->srx);
+ 				memcpy(msg->msg_name,
+-				       &call->conn->trans->peer->srx,
+-				       sizeof(call->conn->trans->peer->srx));
++				       &call->conn->trans->peer->srx, len);
++				msg->msg_namelen = len;
++			}
+ 			sock_recv_ts_and_drops(msg, &rx->sk, skb);
+ 		}
+ 
+diff -Nur -X dontdiff a/net/sched/sch_sfb.c b/net/sched/sch_sfb.c
+--- a/net/sched/sch_sfb.c	2016-06-09 16:36:36.550505000 -0400
++++ b/net/sched/sch_sfb.c	2016-06-10 09:55:28.850115591 -0400
+@@ -570,6 +570,8 @@
+ 
+ 	sch->qstats.backlog = q->qdisc->qstats.backlog;
+ 	opts = nla_nest_start(skb, TCA_OPTIONS);
++	if (opts == NULL)
++		goto nla_put_failure;
+ 	NLA_PUT(skb, TCA_SFB_PARMS, sizeof(opt), &opt);
+ 	return nla_nest_end(skb, opts);
+ 
+diff -Nur -X dontdiff a/net/socket.c b/net/socket.c
+--- a/net/socket.c	2016-06-09 16:36:36.555505000 -0400
++++ b/net/socket.c	2016-06-10 17:53:00.668863703 -0400
+@@ -1792,8 +1792,10 @@
+ 	msg.msg_iov = &iov;
+ 	iov.iov_len = size;
+ 	iov.iov_base = ubuf;
+-	msg.msg_name = (struct sockaddr *)&address;
+-	msg.msg_namelen = sizeof(address);
++	/* Save some cycles and don't copy the address if not needed */
++	msg.msg_name = addr ? (struct sockaddr *)&address : NULL;
++	/* We assume all kernel code knows the size of sockaddr_storage */
++	msg.msg_namelen = 0;
+ 	if (sock->file->f_flags & O_NONBLOCK)
+ 		flags |= MSG_DONTWAIT;
+ 	err = sock_recvmsg(sock, &msg, size, flags);
+@@ -1917,6 +1919,16 @@
+ 	unsigned int name_len;
+ };
+ 
++static int copy_msghdr_from_user(struct msghdr *kmsg,
++				 struct msghdr __user *umsg)
++{
++	if (copy_from_user(kmsg, umsg, sizeof(struct msghdr)))
++		return -EFAULT;
++	if (kmsg->msg_namelen > sizeof(struct sockaddr_storage))
++		return -EINVAL;
++	return 0;
++}
++
+ static int __sys_sendmsg(struct socket *sock, struct msghdr __user *msg,
+ 			 struct msghdr *msg_sys, unsigned flags,
+ 			 struct used_address *used_address)
+@@ -1935,8 +1947,11 @@
+ 	if (MSG_CMSG_COMPAT & flags) {
+ 		if (get_compat_msghdr(msg_sys, msg_compat))
+ 			return -EFAULT;
+-	} else if (copy_from_user(msg_sys, msg, sizeof(struct msghdr)))
+-		return -EFAULT;
++	} else {
++		err = copy_msghdr_from_user(msg_sys, msg);
++		if (err)
++			return err;
++	}
+ 
+ 	/* do not move before msg_sys is valid */
+ 	err = -EMSGSIZE;
+@@ -2136,8 +2151,11 @@
+ 	if (MSG_CMSG_COMPAT & flags) {
+ 		if (get_compat_msghdr(msg_sys, msg_compat))
+ 			return -EFAULT;
+-	} else if (copy_from_user(msg_sys, msg, sizeof(struct msghdr)))
+-		return -EFAULT;
++	} else {
++		err = copy_msghdr_from_user(msg_sys, msg);
++		if (err)
++			return err;
++	}
+ 
+ 	err = -EMSGSIZE;
+ 	if (msg_sys->msg_iovlen > UIO_MAXIOV)
+@@ -2152,16 +2170,14 @@
+ 			goto out;
+ 	}
+ 
+-	/*
+-	 *      Save the user-mode address (verify_iovec will change the
+-	 *      kernel msghdr to use the kernel address space)
++	/* Save the user-mode address (verify_iovec will change the
++	 * kernel msghdr to use the kernel address space)
+ 	 */
+-
+ 	uaddr = (__force void __user *)msg_sys->msg_name;
+ 	uaddr_len = COMPAT_NAMELEN(msg);
+-	if (MSG_CMSG_COMPAT & flags) {
++	if (MSG_CMSG_COMPAT & flags)
+ 		err = verify_compat_iovec(msg_sys, iov, &addr, VERIFY_WRITE);
+-	} else
++	else
+ 		err = verify_iovec(msg_sys, iov, &addr, VERIFY_WRITE);
+ 	if (err < 0)
+ 		goto out_freeiov;
+@@ -2170,6 +2186,9 @@
+ 	cmsg_ptr = (unsigned long)msg_sys->msg_control;
+ 	msg_sys->msg_flags = flags & (MSG_CMSG_CLOEXEC|MSG_CMSG_COMPAT);
+ 
++	/* We assume all kernel code knows the size of sockaddr_storage */
++	msg_sys->msg_namelen = 0;
++
+ 	if (sock->file->f_flags & O_NONBLOCK)
+ 		flags |= MSG_DONTWAIT;
+ 	err = (nosec ? sock_recvmsg_nosec : sock_recvmsg)(sock, msg_sys,
+diff -Nur -X dontdiff a/net/unix/af_unix.c b/net/unix/af_unix.c
+--- a/net/unix/af_unix.c	2016-06-09 16:36:36.563505000 -0400
++++ b/net/unix/af_unix.c	2016-06-10 17:32:25.901160060 -0400
+@@ -1745,7 +1745,6 @@
+ {
+ 	struct unix_sock *u = unix_sk(sk);
+ 
+-	msg->msg_namelen = 0;
+ 	if (u->addr) {
+ 		msg->msg_namelen = u->addr->len;
+ 		memcpy(msg->msg_name, u->addr->name, u->addr->len);
+@@ -1769,8 +1768,6 @@
+ 	if (flags&MSG_OOB)
+ 		goto out;
+ 
+-	msg->msg_namelen = 0;
+-
+ 	err = mutex_lock_interruptible(&u->readlock);
+ 	if (err) {
+ 		err = sock_intr_errno(sock_rcvtimeo(sk, noblock));
+@@ -1912,8 +1909,6 @@
+ 	target = sock_rcvlowat(sk, flags&MSG_WAITALL, size);
+ 	timeo = sock_rcvtimeo(sk, flags&MSG_DONTWAIT);
+ 
+-	msg->msg_namelen = 0;
+-
+ 	/* Lock the socket to prevent queue disordering
+ 	 * while sleeps in memcpy_tomsg
+ 	 */
+diff -Nur -X dontdiff a/net/x25/af_x25.c b/net/x25/af_x25.c
+--- a/net/x25/af_x25.c	2016-06-09 16:36:36.567505000 -0400
++++ b/net/x25/af_x25.c	2016-06-10 17:32:25.901160060 -0400
+@@ -1345,10 +1345,9 @@
+ 	if (sx25) {
+ 		sx25->sx25_family = AF_X25;
+ 		sx25->sx25_addr   = x25->dest_addr;
++		msg->msg_namelen = sizeof(*sx25);
+ 	}
+ 
+-	msg->msg_namelen = sizeof(struct sockaddr_x25);
+-
+ 	x25_check_rbuf(sk);
+ 	rc = copied;
+ out_free_dgram:
+diff -Nur -X dontdiff a/security/keys/process_keys.c b/security/keys/process_keys.c
+--- a/security/keys/process_keys.c	2016-06-09 16:36:36.586505000 -0400
++++ b/security/keys/process_keys.c	2016-06-10 10:06:05.967046932 -0400
+@@ -54,7 +54,7 @@
+ 
+ 	kenter("%p{%u}", user, user->uid);
+ 
+-	if (user->uid_keyring) {
++	if (user->uid_keyring && user->session_keyring) {
+ 		kleave(" = 0 [exist]");
+ 		return 0;
+ 	}

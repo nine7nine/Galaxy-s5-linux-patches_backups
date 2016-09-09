@@ -1,0 +1,2554 @@
+diff -Nuarb a/include/linux/sync.h b/include/linux/sync.h
+--- a/include/linux/sync.h	2016-01-06 22:47:37.621090983 -0500
++++ b/include/linux/sync.h	2015-12-01 05:57:52.000000000 -0500
+@@ -84,6 +84,9 @@
+ 
+ 	/* optional */
+ 	void (*pt_value_str)(struct sync_pt *pt, char *str, int size);
++
++	/* optional */
++	void (*pt_log)(struct sync_pt *pt);
+ };
+ 
+ /**
+@@ -342,6 +345,15 @@
+  */
+ int sync_fence_wait(struct sync_fence *fence, long timeout);
+ 
++/**
++ * sync_fence_log() - log the details of the fence in the kernel log
++ * @fence:	fence to log
++ *
++ * Log the details of the fence and the associated sync points in the kernel
++ * log.
++ */
++void sync_fence_log(struct sync_fence *fence);
++
+ #endif /* __KERNEL__ */
+ 
+ /**
+diff -X dontdiff -Nuarb a/drivers/base/dma-contiguous.c b/drivers/base/dma-contiguous.c
+--- a/drivers/base/dma-contiguous.c	2016-01-06 15:00:41.466590484 -0500
++++ b/drivers/base/dma-contiguous.c	2015-12-01 05:54:38.000000000 -0500
+@@ -540,8 +540,8 @@
+ 			page = pfn_to_page(pfn);
+ 			break;
+ 		} else if (ret != -EBUSY) {
+-			pfn = 0;
+ 			clear_cma_bitmap(cma, pfn, count);
++			pfn = 0;
+ 			break;
+ 		}
+ 		clear_cma_bitmap(cma, pfn, count);
+diff -X dontdiff -Nuarb a/drivers/base/sync.c b/drivers/base/sync.c
+--- a/drivers/base/sync.c	2016-01-06 15:00:41.469590485 -0500
++++ b/drivers/base/sync.c	2015-12-01 05:54:38.000000000 -0500
+@@ -34,7 +34,6 @@
+ static void sync_fence_signal_pt(struct sync_pt *pt);
+ static int _sync_pt_has_signaled(struct sync_pt *pt);
+ static void sync_fence_free(struct kref *kref);
+-static void sync_dump(struct sync_fence *fence);
+ 
+ static LIST_HEAD(sync_timeline_list_head);
+ static DEFINE_SPINLOCK(sync_timeline_list_lock);
+@@ -586,6 +585,74 @@
+ 	return fence->status != 0;
+ }
+ 
++static const char *sync_status_str(int status)
++{
++	if (status > 0)
++		return "signaled";
++	else if (status == 0)
++		return "active";
++	else
++		return "error";
++}
++
++static void sync_pt_log(struct sync_pt *pt)
++{
++	int status = pt->status;
++	pr_cont("  %s_pt %s",
++		   pt->parent->name,
++		   sync_status_str(status));
++
++	if (pt->status) {
++		struct timeval tv = ktime_to_timeval(pt->timestamp);
++		pr_cont("@%ld.%06ld", tv.tv_sec, tv.tv_usec);
++	}
++
++	if (pt->parent->ops->timeline_value_str &&
++	    pt->parent->ops->pt_value_str) {
++		char value[64];
++		pt->parent->ops->pt_value_str(pt, value, sizeof(value));
++		pr_cont(": %s", value);
++		pt->parent->ops->timeline_value_str(pt->parent, value,
++					    sizeof(value));
++		pr_cont(" / %s", value);
++	}
++
++	pr_cont("\n");
++
++	/* Show additional details for active fences */
++	if (pt->status == 0 && pt->parent->ops->pt_log)
++		pt->parent->ops->pt_log(pt);
++}
++
++void sync_fence_log(struct sync_fence *fence)
++{
++	struct list_head *pos;
++	unsigned long flags;
++
++	pr_info("[%p] %s: %s\n", fence, fence->name,
++		sync_status_str(fence->status));
++
++	pr_info("waiters:\n");
++
++	spin_lock_irqsave(&fence->waiter_list_lock, flags);
++	list_for_each(pos, &fence->waiter_list_head) {
++		struct sync_fence_waiter *waiter =
++			container_of(pos, struct sync_fence_waiter,
++				     waiter_list);
++
++		pr_info(" %pF\n", waiter->callback);
++	}
++	spin_unlock_irqrestore(&fence->waiter_list_lock, flags);
++
++	pr_info("syncpoints:\n");
++	list_for_each(pos, &fence->pt_list_head) {
++		struct sync_pt *pt =
++			container_of(pos, struct sync_pt, pt_list);
++		sync_pt_log(pt);
++	}
++}
++EXPORT_SYMBOL(sync_fence_log);
++
+ int sync_fence_wait(struct sync_fence *fence, long timeout)
+ {
+ 	int err = 0;
+@@ -611,7 +678,7 @@
+ 
+ 	if (fence->status < 0) {
+ 		pr_info("fence error %d on [%p]\n", fence->status, fence);
+-		sync_dump(fence);
++		sync_fence_log(fence);
+ 		return fence->status;
+ 	}
+ 
+@@ -619,7 +686,7 @@
+ 		if (timeout > 0) {
+ 			pr_info("fence timeout on [%p] after %dms\n", fence,
+ 				jiffies_to_msecs(timeout));
+-			sync_dump(fence);
++			sync_fence_log(fence);
+ 		}
+ 		return -ETIME;
+ 	}
+@@ -841,16 +908,6 @@
+ }
+ 
+ #ifdef CONFIG_DEBUG_FS
+-static const char *sync_status_str(int status)
+-{
+-	if (status > 0)
+-		return "signaled";
+-	else if (status == 0)
+-		return "active";
+-	else
+-		return "error";
+-}
+-
+ static void sync_print_pt(struct seq_file *s, struct sync_pt *pt, bool fence)
+ {
+ 	int status = pt->status;
+@@ -983,35 +1040,4 @@
+ 	return 0;
+ }
+ late_initcall(sync_debugfs_init);
+-
+-#define DUMP_CHUNK 256
+-static char sync_dump_buf[64 * 1024];
+-static void sync_dump(struct sync_fence *fence)
+-{
+-       struct seq_file s = {
+-               .buf = sync_dump_buf,
+-               .size = sizeof(sync_dump_buf) - 1,
+-       };
+-       int i;
+-
+-       seq_printf(&s, "fence:\n--------------\n");
+-       sync_print_fence(&s, fence);
+-       seq_printf(&s, "\n");
+-
+-       for (i = 0; i < s.count; i += DUMP_CHUNK) {
+-               if ((s.count - i) > DUMP_CHUNK) {
+-                       char c = s.buf[i + DUMP_CHUNK];
+-                       s.buf[i + DUMP_CHUNK] = 0;
+-                       pr_cont("%s", s.buf + i);
+-                       s.buf[i + DUMP_CHUNK] = c;
+-               } else {
+-                       s.buf[s.count] = 0;
+-                       pr_cont("%s", s.buf + i);
+-               }
+-       }
+-}
+-#else
+-static void sync_dump(struct sync_fence *fence)
+-{
+-}
+ #endif
+diff -X dontdiff -Nuarb a/drivers/gpu/gpu_sysfs/gpu_sysfs_header.h b/drivers/gpu/gpu_sysfs/gpu_sysfs_header.h
+--- a/drivers/gpu/gpu_sysfs/gpu_sysfs_header.h	1969-12-31 19:00:00.000000000 -0500
++++ b/drivers/gpu/gpu_sysfs/gpu_sysfs_header.h	2015-12-01 05:54:52.000000000 -0500
+@@ -0,0 +1,96 @@
++#ifndef		__GPU_SYSFS_HEADER_H__
++#define		__GPU_SYSFS_HEADER_H__
++
++/* Linux kernel header. */
++#include	<linux/kobject.h>
++#include	<linux/string.h>
++#include	<linux/sysfs.h>
++#include	<linux/module.h>
++#include	<linux/init.h>
++#include	<linux/platform_device.h>
++#include	<linux/slab.h>
++
++/* File handling related headers. */
++#include	<linux/fs.h>
++#include	<asm/segment.h>
++#include	<asm/uaccess.h>
++#include	<linux/buffer_head.h>
++#include	<linux/string.h>
++
++/* Some necessary defines and typedefs. */
++#define		GPU_SYSFS_MODULE_NAME	"gpusysfs"
++#define		DEVNAME_SIZE			32
++#define		SRUK_FALSE			1
++#define		SRUK_TRUE			0
++#define		SRUK_DRV_NAME			"sruk"
++typedef		unsigned int		sruk_bool;
++static const char				sruk_drv_name[] = SRUK_DRV_NAME;
++
++/* Device and attribute data structure. */
++typedef struct sruk_os_device
++{
++	struct list_head	entry;
++	struct device	   *dev;
++	char				devname[DEVNAME_SIZE];
++} sruk_os_device;
++
++typedef struct sruk_attribute
++{
++	int id;
++	uintptr_t data;
++} sruk_attribute;
++
++typedef struct sruk_device
++{
++	sruk_os_device		osdev;
++} sruk_device;
++
++/* *
++ * *********************************************************************
++ * Function prototypes for sysfs.
++ * *********************************************************************
++ * */
++ssize_t gpu_min_clock_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_max_clock_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_busy_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_vol_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_freq_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_freq_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);
++ssize_t gpu_freq_table_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_governor_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_governor_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);
++ssize_t gpu_available_governor_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_cores_config_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_tmu_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_model_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_version_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t gpu_mem_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t fps_show(struct device *dev, struct device_attribute *attr, char *buf);
++ssize_t fps_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);
++
++/* *
++ * *********************************************************************
++ * File handling related function prototypes..
++ * *********************************************************************
++ * */
++struct file* file_open(const char* path, int flags, int rights) ;
++void	file_close(struct file *file_ptr);
++int	file_read(struct file *file_ptr, unsigned long long offset, unsigned char* data, unsigned int size);
++int	file_write(struct file *file_ptr, unsigned long long offset, unsigned char* data, unsigned int size);
++int	file_sync(struct file* file_ptr);
++int	open_file_and_read_buffer(char *filename_and_path, char *input_buffer, int input_buffer_size);
++int	open_file_and_write_buffer(char *filename_and_path, const char *buffer, int buffer_size);
++
++/* *
++ * *********************************************************************
++ * Buffer size for reading from sysfs files.
++ * *********************************************************************
++ * */
++#define		INPUT_BUFFER_SIZE_16	16
++#define		INPUT_BUFFER_SIZE_32	32
++#define		INPUT_BUFFER_SIZE_64	64
++#define		INPUT_BUFFER_SIZE_128	128
++#define		INPUT_BUFFER_SIZE_256	256
++#define		INPUT_BUFFER_SIZE_512	512
++
++#endif		/* __GPU_SYSFS_HEADER_H__ */
+diff -X dontdiff -Nuarb a/drivers/gpu/gpu_sysfs/gpu_sysfs_main.c b/drivers/gpu/gpu_sysfs/gpu_sysfs_main.c
+--- a/drivers/gpu/gpu_sysfs/gpu_sysfs_main.c	1969-12-31 19:00:00.000000000 -0500
++++ b/drivers/gpu/gpu_sysfs/gpu_sysfs_main.c	2015-12-01 05:54:52.000000000 -0500
+@@ -0,0 +1,268 @@
++#include	"gpu_sysfs_header.h"
++
++/* Platform device global pointer. */
++static struct platform_device *gpu_sysfs_pdev;
++
++/* *
++ * *********************************************************************
++ * Device attribute macros, linking functions with sysfs.
++ * *********************************************************************
++ * */
++DEVICE_ATTR(gpu_min_clock, 0444, gpu_min_clock_show, NULL);
++DEVICE_ATTR(gpu_max_clock, 0444, gpu_max_clock_show, NULL);
++DEVICE_ATTR(gpu_busy, 0444, gpu_busy_show, NULL);
++DEVICE_ATTR(gpu_voltage, 0444, gpu_vol_show, NULL);
++DEVICE_ATTR(gpu_clock, 0666, gpu_freq_show, gpu_freq_write);
++DEVICE_ATTR(gpu_freq_table, 0444, gpu_freq_table_show, NULL);
++DEVICE_ATTR(gpu_governor, 0666, gpu_governor_show, gpu_governor_write);
++DEVICE_ATTR(gpu_available_governor, 0444, gpu_available_governor_show, NULL);
++DEVICE_ATTR(gpu_cores_config, 0444, gpu_cores_config_show, NULL);
++DEVICE_ATTR(gpu_tmu, 0444, gpu_tmu_show, NULL);
++DEVICE_ATTR(gpu_model, 0444, gpu_model_show, NULL);
++DEVICE_ATTR(gpu_version, 0444, gpu_version_show, NULL);
++DEVICE_ATTR(gpu_mem, 0444, gpu_mem_show, NULL);
++DEVICE_ATTR(fps, 0666, fps_show, fps_write);
++
++/* The below function will generate sysfs during initialization stage. */
++int gpu_sysfs_create_sysfs_files(struct device *dev)
++{
++	pr_info("GPU_SYSFS ----------- %s -- %d", __FUNCTION__, __LINE__);
++
++	if (device_create_file(dev, &dev_attr_gpu_min_clock))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_max_clock))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_busy))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_voltage))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_clock))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_freq_table))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_governor))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_available_governor))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_cores_config))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_tmu))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_model))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_version))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_gpu_mem))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	if (device_create_file(dev, &dev_attr_fps))
++	{
++		pr_info("GPU_SYSFS: Couldn't create sysfs file %d\n", __LINE__);
++		goto out;
++	}
++
++	pr_info("GPU_SYSFS ----------- %s -- %d", __FUNCTION__, __LINE__);
++	return 0;
++
++out:
++	return -ENOENT;
++}
++
++void gpu_sysfs_remove_sysfs_files(struct device *dev)
++{
++	pr_info("GPU_SYSFS ----------- %s -- %d", __FUNCTION__, __LINE__);
++
++	device_remove_file(dev, &dev_attr_gpu_min_clock);
++	device_remove_file(dev, &dev_attr_gpu_max_clock);
++	device_remove_file(dev, &dev_attr_gpu_busy);
++	device_remove_file(dev, &dev_attr_gpu_voltage);
++	device_remove_file(dev, &dev_attr_gpu_clock);
++	device_remove_file(dev, &dev_attr_gpu_freq_table);
++	device_remove_file(dev, &dev_attr_gpu_governor);
++	device_remove_file(dev, &dev_attr_gpu_available_governor);
++	device_remove_file(dev, &dev_attr_gpu_cores_config);
++	device_remove_file(dev, &dev_attr_gpu_tmu);
++	device_remove_file(dev, &dev_attr_gpu_model);
++	device_remove_file(dev, &dev_attr_gpu_version);
++	device_remove_file(dev, &dev_attr_gpu_mem);
++	device_remove_file(dev, &dev_attr_fps);
++}
++
++sruk_bool gpu_sysfs_device_init(sruk_device * const kbdev)
++{
++	pr_info("GPU_SYSFS ----------- %s -- %d", __FUNCTION__, __LINE__);
++
++	if (gpu_sysfs_create_sysfs_files(kbdev->osdev.dev))
++		return SRUK_FALSE;
++
++	return SRUK_TRUE;
++}
++
++static int gpu_sysfs_probe(struct platform_device *pdev)
++{
++	struct sruk_device *kbdev;
++	struct sruk_os_device *osdev;
++	int err;
++
++	pr_info("GPU_SYSFS ----------- %s -- %d", __FUNCTION__, __LINE__);
++
++	kbdev = kzalloc(sizeof(sruk_device), GFP_KERNEL);
++	if (!kbdev)
++	{
++		dev_err(&pdev->dev, "GPU_SYSFS: Can't allocate device\n");
++		err = -ENOMEM;
++		goto out;
++	}
++
++	osdev = &kbdev->osdev;
++	osdev->dev = &pdev->dev;
++
++	if (SRUK_TRUE != gpu_sysfs_device_init(kbdev)) {
++		pr_info( "GPU_SYSFS: gpu_sysfs_device_init failed");
++		dev_err(&pdev->dev, "GPU_SYSFS: Can't initialize device\n");
++		err = -ENOMEM;
++		goto out_reg_unmap;
++	}
++
++	pr_info("GPU_SYSFS ----------- %s -- %d", __FUNCTION__, __LINE__);
++	osdev = NULL;
++	kzfree(kbdev);
++	return 0;
++
++out_reg_unmap:
++	osdev = NULL;
++	kzfree(kbdev);
++out:
++	return err;
++}
++
++
++static int gpu_sysfs_remove(struct platform_device *pdev)
++{
++	struct sruk_device *kbdev = (struct sruk_device *)(&pdev->dev);
++
++	pr_info("GPU_SYSFS ----------- %s -- %d", __FUNCTION__, __LINE__);
++
++	if (!kbdev)
++		return -ENODEV;
++
++	gpu_sysfs_remove_sysfs_files(kbdev->osdev.dev);
++
++	kzfree(kbdev);
++
++	return 0;
++}
++
++
++/* Platform driver operations and assigning function pointers. */
++static struct platform_driver gpu_sysfs_platform_driver =
++{
++    .probe = gpu_sysfs_probe,
++    .remove = gpu_sysfs_remove,
++    .driver =
++    {
++        .name =		GPU_SYSFS_MODULE_NAME,
++        .owner =	THIS_MODULE,
++    },
++};
++
++static int __init gpu_sysfs_init(void)
++{
++	int ret;
++
++	pr_info("GPU_SYSFS ----------- %s -- %d", __FUNCTION__, __LINE__);
++
++	gpu_sysfs_pdev = platform_device_alloc(GPU_SYSFS_MODULE_NAME, -1);
++	if (!gpu_sysfs_pdev)
++	{
++		pr_info("GPU_SYSFS ----------- %s -- %d", __FUNCTION__, __LINE__);
++		pr_err("Failed to allocate dummy regulator device\n");
++		return 0;
++	}
++
++	/* Add platform device. */
++	ret = platform_device_add(gpu_sysfs_pdev);
++	if (ret != 0)
++	{
++		pr_err("GPU_SYSFS: Failed to register dummy regulator device: %d\n", ret);
++		platform_device_put(gpu_sysfs_pdev);
++		return 0;
++	}
++
++	ret = platform_driver_register(&gpu_sysfs_platform_driver);
++	if (ret != 0)
++	{
++		pr_err("GPU_SYSFS: Failed to register dummy regulator driver: %d\n", ret);
++		platform_device_unregister(gpu_sysfs_pdev);
++	}
++
++	pr_info("GPU_SYSFS ----------- %s -- %d", __FUNCTION__, __LINE__);
++
++	return 0;
++}
++
++static void __exit gpu_sysfs_exit(void)
++{
++	pr_info( "GPU_SYSFS: Unified Sysfs for GPU: Exiting" );
++	platform_driver_unregister(&gpu_sysfs_platform_driver);
++}
++
++
++module_init(gpu_sysfs_init);
++module_exit(gpu_sysfs_exit);
++
++MODULE_AUTHOR("SRUK_GFX");
++MODULE_DESCRIPTION("GPU_SYSFS: Module for Unified Sysfs for GPU");
++MODULE_LICENSE("GPL");
++MODULE_VERSION("1.0");
+diff -X dontdiff -Nuarb a/drivers/gpu/gpu_sysfs/gpu_sysfs_target_kgsl.c b/drivers/gpu/gpu_sysfs/gpu_sysfs_target_kgsl.c
+--- a/drivers/gpu/gpu_sysfs/gpu_sysfs_target_kgsl.c	1969-12-31 19:00:00.000000000 -0500
++++ b/drivers/gpu/gpu_sysfs/gpu_sysfs_target_kgsl.c	2015-12-01 05:54:52.000000000 -0500
+@@ -0,0 +1,350 @@
++#include	"gpu_sysfs_header.h"
++
++/* *
++ * *********************************************************************
++ * Path defines for all the sysfs files.
++ * *********************************************************************
++ * */
++#define		GPU_MIN_CLOCK		"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/devfreq/min_freq"
++#define		GPU_MAX_CLOCK		"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/devfreq/max_freq"
++#define		GPU_BUSY			"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/gpubusy"
++#define		GPU_VOL				"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/vol"
++#define		GPU_FREQ			"/sys/kernel/debug/clk/oxili_gfx3d_clk/measure"
++#define		GPU_FREQ_TABLE		"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/gpu_available_frequencies"
++#define		GPU_GOVERNOR		"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/devfreq/governor"
++#define		GPU_AVAIL_GOVERNOR	"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/devfreq/available_governors"
++/*#define	GPU_CORES_CONFIG	"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/core_mask" -- Not available  from sysfs. */
++#define		GPU_TMU				"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/thermal_pwrlevel"
++/*#define	GPU_MODEL			"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/modalias"  -- Not available  from sysfs. */
++#define		GPU_VERSION			"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/uevent"
++/*#define	GPU_MEM				"/sys/devices/fdb00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/gpu_mem" -- Not available directly from sysfs. */
++#define		QUALCOMM_SYSFS_GPU_FPS		"/sys/devices/platform/gpusysfs/fps"
++/*
++ * atoi function ----
++ * Taken from drivers/video/msm/external_common.c
++ * from Kernel source for KLTE device.
++ * */
++static int atoi_ignore_space(const char *name)
++{
++	int val = 0;
++
++	for (;; name++) {
++		switch (*name) {
++		case '0' ... '9':
++			val = 10*val+(*name-'0');
++			break;
++		case ' ':
++			break;
++		default:
++			return val;
++		}
++	}
++}
++
++/* *
++ * *********************************************************************
++ * Device ATTR functions. Will be called when read from sysfs.
++ * *********************************************************************
++ * */
++ssize_t gpu_min_clock_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	char	input_buffer[INPUT_BUFFER_SIZE_32];
++	int		status = 0;
++
++	status = open_file_and_read_buffer(GPU_MIN_CLOCK, input_buffer, INPUT_BUFFER_SIZE_32);
++
++	if (status == SRUK_TRUE)
++	{
++		return sprintf(buf, "%s", input_buffer);
++	}
++	else
++	{
++		return sprintf(buf, "-1");
++	}
++}
++
++ssize_t gpu_max_clock_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	char	input_buffer[INPUT_BUFFER_SIZE_32];
++	int		status = 0;
++
++	status = open_file_and_read_buffer(GPU_MAX_CLOCK, input_buffer, INPUT_BUFFER_SIZE_32);
++
++	if (status == SRUK_TRUE)
++	{
++		return sprintf(buf, "%s", input_buffer);
++	}
++	else
++	{
++		return sprintf(buf, "-1");
++	}
++}
++
++ssize_t gpu_busy_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	char		time_consumed_str[INPUT_BUFFER_SIZE_32] = {0};
++	char		time_elapsed_str[INPUT_BUFFER_SIZE_32] = {0};
++	unsigned int	time_consumed = 0;
++	unsigned int	time_elapsed = 0;
++	char			input_buffer[INPUT_BUFFER_SIZE_32];
++	int				status = 0;
++
++	status = open_file_and_read_buffer(GPU_MAX_CLOCK, input_buffer, INPUT_BUFFER_SIZE_32);
++
++	if (status != SRUK_TRUE)
++	{
++		return sprintf(buf, "-1");
++	}
++
++	/* ************************************ */
++	/* Parse input to find utilization ratio.
++	 * This is target specific.
++	 * kgsl drive outputs utilzation in terms of
++	 * elapsed time using "%7d %7d"
++	 * */
++	/* ************************************ */
++	strncpy(time_consumed_str, input_buffer,   7);
++	strncpy(time_elapsed_str,  input_buffer+8, 7);
++
++	time_consumed = atoi_ignore_space(time_consumed_str);
++	time_elapsed = atoi_ignore_space(time_elapsed_str);
++
++	return sprintf(buf, "%d\n", ((time_consumed*100)/time_elapsed));
++}
++
++ssize_t gpu_vol_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return sprintf(buf, "gpu_voltage      --       Not available.\n");
++}
++
++ssize_t gpu_freq_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	char	input_buffer[INPUT_BUFFER_SIZE_32];
++	int		status = 0;
++
++	status = open_file_and_read_buffer(GPU_FREQ, input_buffer, INPUT_BUFFER_SIZE_32);
++
++	if (status == SRUK_TRUE)
++	{
++		return sprintf(buf, "%s", input_buffer);
++	}
++	else
++	{
++		return sprintf(buf, "-1");
++	}
++}
++
++ssize_t gpu_freq_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
++{
++	pr_info("SRUK ----------- %s -- %d", __FUNCTION__, __LINE__);
++	if (open_file_and_write_buffer(GPU_GOVERNOR, "performance", strlen("performance")) == 0)
++	{
++		pr_info("SRUK ----------- %s -- %d", __FUNCTION__, __LINE__);
++		return 0;
++	}
++/*
++	pr_info("SRUK ----------- %s -- %d", __FUNCTION__, __LINE__);
++	if (open_file_and_write_buffer(GPU_FREQ, buf, strlen(buf)) == 0)
++	{
++		pr_info("SRUK ----------- %s -- %d", __FUNCTION__, __LINE__);
++		return 0;
++	}
++*/
++	pr_info("SRUK ----------- %s -- %d", __FUNCTION__, __LINE__);
++	/* Return success status. */
++	return count;
++}
++
++ssize_t gpu_freq_table_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	char	input_buffer[INPUT_BUFFER_SIZE_128];
++	int		status = 0;
++
++	status = open_file_and_read_buffer(GPU_FREQ_TABLE, input_buffer, INPUT_BUFFER_SIZE_128);
++
++	if (status == SRUK_TRUE)
++	{
++		return sprintf(buf, "%s", input_buffer);
++	}
++	else
++	{
++		return sprintf(buf, "-1");
++	}
++}
++
++ssize_t gpu_governor_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	char	input_buffer[INPUT_BUFFER_SIZE_32];
++	int		status = 0;
++
++	status = open_file_and_read_buffer(GPU_GOVERNOR, input_buffer, INPUT_BUFFER_SIZE_32);
++
++	if (status == SRUK_TRUE)
++	{
++		return sprintf(buf, "%s", input_buffer);
++	}
++	else
++	{
++		return sprintf(buf, "-1");
++	}
++}
++
++ssize_t gpu_governor_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
++{
++	pr_info("SRUK ----------- %s -- %d", __FUNCTION__, __LINE__);
++	if (open_file_and_write_buffer(GPU_GOVERNOR, buf, strlen(buf)) == 0)
++	{
++		pr_info("SRUK ----------- %s -- %d", __FUNCTION__, __LINE__);
++		return 0;
++	}
++
++	pr_info("SRUK ----------- %s -- %d", __FUNCTION__, __LINE__);
++
++	/* Return success status. */
++	return count;
++}
++
++ssize_t gpu_available_governor_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	char	input_buffer[INPUT_BUFFER_SIZE_256];
++	int		status = 0;
++
++	status = open_file_and_read_buffer(GPU_AVAIL_GOVERNOR, input_buffer, INPUT_BUFFER_SIZE_256);
++
++	if (status == SRUK_TRUE)
++	{
++		return sprintf(buf, "%s", input_buffer);
++	}
++	else
++	{
++		return sprintf(buf, "-1");
++	}
++}
++
++ssize_t gpu_cores_config_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return sprintf(buf, "gpu_core_config  --       Not available.\n");
++}
++
++ssize_t gpu_tmu_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	char	input_buffer[INPUT_BUFFER_SIZE_32];
++	int		status = 0;
++
++	status = open_file_and_read_buffer(GPU_TMU, input_buffer, INPUT_BUFFER_SIZE_32);
++
++	if (status == SRUK_TRUE)
++	{
++		return sprintf(buf, "%s", input_buffer);
++	}
++	else
++	{
++		return sprintf(buf, "-1");
++	}
++}
++
++ssize_t gpu_model_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	char			input_buffer[INPUT_BUFFER_SIZE_128];
++	int				status = 0;
++	char			*parse_pointer = input_buffer;
++	int			char_counter = 0, equal_char_counter = 0;
++
++	status = open_file_and_read_buffer(GPU_VERSION, input_buffer, INPUT_BUFFER_SIZE_128);
++
++	if (status != SRUK_TRUE)
++	{
++		return sprintf(buf, "-1");
++	}
++
++	/* ************************************ */
++	/* Parse input to find gpu version.
++	 * This is target specific.
++	 * The driver gives information in following
++	 * format:
++	 *    MAJOR=242
++	 *    MINOR=0
++	 *    DEVNAME=kgsl-3d0
++	 * */
++	/* ************************************ */
++
++	while (*parse_pointer != '\0')
++	{
++		/* Look for '='. */
++		if (*parse_pointer == '=')
++		{
++			equal_char_counter++;
++		}
++
++		/* */
++		parse_pointer++;
++		char_counter++;
++
++		if (equal_char_counter == 3)
++		{
++			break;
++		}
++	}
++
++	/* Copy the model string to the output string.*/
++	return sprintf(buf, "%s\n", input_buffer+char_counter);
++}
++
++ssize_t gpu_version_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	char		version_major_str[INPUT_BUFFER_SIZE_16] = {0};
++	char		version_minor_str[INPUT_BUFFER_SIZE_16] = {0};
++	unsigned int	version_major = 0, version_minor = 0;
++	char			input_buffer[INPUT_BUFFER_SIZE_128];
++	int				status = 0;
++
++	status = open_file_and_read_buffer(GPU_VERSION, input_buffer, INPUT_BUFFER_SIZE_128);
++
++	if (status != SRUK_TRUE)
++	{
++		return sprintf(buf, "-1");
++	}
++
++	/* ************************************ */
++	/* Parse input to find gpu version.
++	 * This is target specific.
++	 * The driver gives information in following
++	 * format:
++	 *    MAJOR=242
++	 *    MINOR=0
++	 *    DEVNAME=kgsl-3d0
++	 * */
++	/* ************************************ */
++
++	strncpy(version_major_str, input_buffer+6, 5);
++	strncpy(version_minor_str, input_buffer+17, 5);
++
++	version_major = atoi_ignore_space(version_major_str);
++	version_minor = atoi_ignore_space(version_minor_str);
++
++	return sprintf(buf, "%d.%d\n", version_major, version_minor);
++}
++
++ssize_t gpu_mem_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return sprintf(buf, "gpu_mem -- Not available.\n");
++}
++
++char	 global_fps_string[INPUT_BUFFER_SIZE_32];
++ssize_t fps_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%s", global_fps_string);
++}
++
++ssize_t fps_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
++{
++	pr_info("SRUK ----------- %s -- %d", __FUNCTION__, __LINE__);
++    if (buf != NULL)
++        sprintf(global_fps_string,"%s", buf);
++    else
++        sprintf(global_fps_string,"0");
++
++	/* Return success status. */
++	return count;
++
++}
+diff -X dontdiff -Nuarb a/drivers/gpu/gpu_sysfs/gpu_sysfs_util.c b/drivers/gpu/gpu_sysfs/gpu_sysfs_util.c
+--- a/drivers/gpu/gpu_sysfs/gpu_sysfs_util.c	1969-12-31 19:00:00.000000000 -0500
++++ b/drivers/gpu/gpu_sysfs/gpu_sysfs_util.c	2015-12-01 05:54:52.000000000 -0500
+@@ -0,0 +1,103 @@
++#include	"gpu_sysfs_header.h"
++
++/* *
++ * *********************************************************************
++ * File handling related functions.
++ * *********************************************************************
++ * */
++struct file* file_open(const char* path, int flags, int rights)
++{
++    struct file* input_file_ptr = NULL;
++    mm_segment_t old_filesystem;
++    int err = 0;
++
++    old_filesystem = get_fs();
++    set_fs(get_ds());
++    input_file_ptr = filp_open(path, flags, rights);
++    set_fs(old_filesystem);
++    if(IS_ERR(input_file_ptr))
++    {
++        err = PTR_ERR(input_file_ptr);
++        return NULL;
++    }
++    return input_file_ptr;
++}
++
++void file_close(struct file *file_ptr)
++{
++    filp_close(file_ptr, NULL);
++}
++
++int file_read(struct file *file_ptr, unsigned long long offset, unsigned char* data, unsigned int size)
++{
++    mm_segment_t old_filesystem;
++    int ret;
++
++    old_filesystem = get_fs();
++    set_fs(get_ds());
++
++    ret = vfs_read(file_ptr, data, size, &offset);
++
++    set_fs(old_filesystem);
++    return ret;
++}
++
++int file_write(struct file *file_ptr, unsigned long long offset, unsigned char* data, unsigned int size)
++{
++    mm_segment_t old_filesystem;
++    int ret;
++
++    old_filesystem = get_fs();
++    set_fs(get_ds());
++
++    ret = vfs_write(file_ptr, data, size, &offset);
++
++    set_fs(old_filesystem);
++    return ret;
++}
++
++int file_sync(struct file* file_ptr)
++{
++    vfs_fsync(file_ptr, 0);
++    return 0;
++}
++
++int open_file_and_read_buffer(char *filename_and_path, char *input_buffer, int input_buffer_size)
++{
++	struct file* input_file_ptr;
++
++	input_file_ptr = file_open(filename_and_path, O_RDONLY, 0);
++	if (input_file_ptr != NULL)
++	{
++		int ret_val = file_read(input_file_ptr, 0, input_buffer, input_buffer_size);
++		if ((ret_val >= 0) && (ret_val < input_buffer_size))
++		    input_buffer[ret_val] = '\0';
++		else if (ret_val == input_buffer_size)
++			input_buffer[ret_val-1] = '\0';
++		file_close(input_file_ptr);
++
++		return SRUK_TRUE;
++	}
++
++	return SRUK_FALSE;
++}
++
++/* The function returns the number of bytes written to the file. */
++int open_file_and_write_buffer(char *filename_and_path, const char *buffer, int buffer_size)
++{
++	struct file* input_file_ptr;
++	int ret_val = 0;
++
++    pr_info("SRUK ----------- %s -- %d", __FUNCTION__, __LINE__);
++	input_file_ptr = file_open(filename_and_path, O_WRONLY, 0);
++	if (input_file_ptr != NULL)
++	{
++		pr_info("SRUK ----------- %s -- %d -- %s -- %d", __FUNCTION__, __LINE__, buffer, buffer_size);
++		ret_val = file_write(input_file_ptr, 0, (unsigned char *)buffer, buffer_size);
++		file_sync(input_file_ptr);
++		file_close(input_file_ptr);
++	}
++
++    pr_info("SRUK ----------- %s -- %d -- ret_val = %d ", __FUNCTION__, __LINE__ , ret_val);
++	return ret_val;
++}
+diff -X dontdiff -Nuarb a/drivers/gpu/gpu_sysfs/Kbuild b/drivers/gpu/gpu_sysfs/Kbuild
+--- a/drivers/gpu/gpu_sysfs/Kbuild	1969-12-31 19:00:00.000000000 -0500
++++ b/drivers/gpu/gpu_sysfs/Kbuild	2015-12-01 05:54:52.000000000 -0500
+@@ -0,0 +1,32 @@
++obj-y := gpu_sysfs.o
++
++# Common files.
++gpu_sysfs-y :=	gpu_sysfs_main.o \
++		        gpu_sysfs_util.o
++
++
++# Platform specific files.
++
++
++# ==================================
++# Start --------- Qualcomm ---------
++ifeq ($(CONFIG_MSM_KGSL),y)
++
++gpu_sysfs-y +=	gpu_sysfs_target_kgsl.o
++# Verify: target specific file is defined.
++GPU_SYSFS_TARGET_FILE_DEFINED=1
++
++endif
++# End ---------- Qualcomm ----------
++# ==================================
++
++
++# ==================================
++# Generate error if the TARGET
++# specific file is not defined OR
++# picked using the PLATFORM configs.
++ifndef GPU_SYSFS_TARGET_FILE_DEFINED
++$(warning **** Make sure target file is defined. \
++               Check the TARGET and GPU configs in Makefile and Kernel Config. \
++               Module won't work without target file. ****)
++endif
+diff -X dontdiff -Nuarb a/drivers/gpu/gpu_sysfs/Kconfig b/drivers/gpu/gpu_sysfs/Kconfig
+--- a/drivers/gpu/gpu_sysfs/Kconfig	1969-12-31 19:00:00.000000000 -0500
++++ b/drivers/gpu/gpu_sysfs/Kconfig	2015-12-01 05:54:52.000000000 -0500
+@@ -0,0 +1,5 @@
++config GPU_UNIFIED_SYSFS
++	tristate "Unified Sysfs for GPU"
++	depends on ARM
++	help
++	  Chose this option to enable the Unified Sysfs for GPU.
+diff -X dontdiff -Nuarb a/drivers/gpu/gpu_sysfs/Makefile b/drivers/gpu/gpu_sysfs/Makefile
+--- a/drivers/gpu/gpu_sysfs/Makefile	1969-12-31 19:00:00.000000000 -0500
++++ b/drivers/gpu/gpu_sysfs/Makefile	2015-12-01 05:54:52.000000000 -0500
+@@ -0,0 +1,43 @@
++# ==================================
++# Start ----- Mali T6xx device -----
++ifneq ($(CONFIG_MODULES),y)
++$(error CONFIG_MODULES. This module won't work. Please enable CONFIG_MODULES in kernel config.)
++endif
++
++obj-m := gpu_sysfs.o
++
++# Common files.
++gpu_sysfs-y :=	gpu_sysfs_main.o \
++		        gpu_sysfs_util.o
++
++
++# Platform specific files.
++
++
++# ==================================
++# Start --------- Qualcomm ---------
++ifeq ($(CONFIG_MSM_KGSL),y)
++
++gpu_sysfs-y +=	gpu_sysfs_target_kgsl.o
++# Verify: target specific file is defined.
++GPU_SYSFS_TARGET_FILE_DEFINED=1
++
++endif
++# End ---------- Qualcomm ----------
++# ==================================
++
++
++# ==================================
++# Generate error if the TARGET
++# specific file is not defined OR
++# picked using the PLATFORM configs.
++ifndef GPU_SYSFS_TARGET_FILE_DEFINED
++$(warning **** Make sure target file is defined. \
++               Check the TARGET and GPU configs in Makefile and Kernel Config. \
++               Module won't work without target file. ****)
++endif
++
++
++clean:
++	rm -f *.o .*.cmd modules.order Module.symvers gpu_sysfs.ko gpu_sysfs.mod.c
++	rm -rf .tmp_versions
+diff -X dontdiff -Nuarb a/drivers/gpu/Makefile b/drivers/gpu/Makefile
+--- a/drivers/gpu/Makefile	2016-01-06 15:00:41.569590490 -0500
++++ b/drivers/gpu/Makefile	2015-12-01 05:54:49.000000000 -0500
+@@ -1,2 +1,3 @@
+ obj-y			+= drm/ vga/ stub/ ion/
+ obj-$(CONFIG_MSM_KGSL)	+= msm/
++obj-y += gpu_sysfs/
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/adreno_a3xx_snapshot.c b/drivers/gpu/msm/adreno_a3xx_snapshot.c
+--- a/drivers/gpu/msm/adreno_a3xx_snapshot.c	2016-01-06 15:00:41.633590493 -0500
++++ b/drivers/gpu/msm/adreno_a3xx_snapshot.c	2015-12-01 05:54:53.000000000 -0500
+@@ -463,6 +463,14 @@
+ 	size = (adreno_is_a330(adreno_dev) ||
+ 		adreno_is_a305b(adreno_dev)) ? 0x2E : 0x14;
+ 
++	/* Skip indexed register dump for these chipsets 8974, 8x26, 8x10 */
++	if (adreno_is_a330(adreno_dev) ||
++		adreno_is_a330v2(adreno_dev) ||
++		adreno_is_a305b(adreno_dev) ||
++		adreno_is_a305c(adreno_dev)	) {
++		KGSL_DRV_ERR(device,
++		"Skipping indexed register dump\n");
++	} else {
+ 	snapshot = kgsl_snapshot_indexed_registers(device, snapshot,
+ 			remain, REG_CP_STATE_DEBUG_INDEX,
+ 			REG_CP_STATE_DEBUG_DATA, 0x0, size);
+@@ -471,6 +479,7 @@
+ 	snapshot = kgsl_snapshot_indexed_registers(device, snapshot,
+ 			remain, REG_CP_ME_CNTL, REG_CP_ME_STATUS,
+ 			64, 44);
++	}
+ 
+ 	/* VPC memory */
+ 	snapshot = kgsl_snapshot_add_section(device,
+@@ -482,10 +491,19 @@
+ 			KGSL_SNAPSHOT_SECTION_DEBUG, snapshot, remain,
+ 			a3xx_snapshot_cp_meq, NULL);
+ 
++	/* Skip shader memory dump for these chipsets: 8974, 8x26, 8x10 */
++	if (adreno_is_a330(adreno_dev) ||
++		adreno_is_a330v2(adreno_dev) ||
++		adreno_is_a305b(adreno_dev) ||
++		adreno_is_a305c(adreno_dev)	) {
++		KGSL_DRV_ERR(device,
++		"Skipping shader memory dump\n");
++	} else {
+ 	/* Shader working/shadow memory */
+ 	snapshot = kgsl_snapshot_add_section(device,
+ 			KGSL_SNAPSHOT_SECTION_DEBUG, snapshot, remain,
+ 			a3xx_snapshot_shader_memory, NULL);
++	}
+ 
+ 
+ 	/* CP PFP and PM4 */
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/adreno.c b/drivers/gpu/msm/adreno.c
+--- a/drivers/gpu/msm/adreno.c	2016-01-06 15:00:41.632590493 -0500
++++ b/drivers/gpu/msm/adreno.c	2015-12-01 05:54:58.000000000 -0500
+@@ -78,7 +78,6 @@
+ 
+ #define KGSL_LOG_LEVEL_DEFAULT 3
+ 
+-static void adreno_start_work(struct work_struct *work);
+ static void adreno_input_work(struct work_struct *work);
+ 
+ /*
+@@ -151,16 +150,12 @@
+ 	.ft_pf_policy = KGSL_FT_PAGEFAULT_DEFAULT_POLICY,
+ 	.fast_hang_detect = 1,
+ 	.long_ib_detect = 1,
+-	.start_work = __WORK_INITIALIZER(device_3d0.start_work,
+-		adreno_start_work),
+ 	.input_work = __WORK_INITIALIZER(device_3d0.input_work,
+ 		adreno_input_work),
+ };
+ 
+ unsigned int ft_detect_regs[FT_DETECT_REGS_COUNT];
+ 
+-static struct workqueue_struct *adreno_wq;
+-
+ /*
+  * This is the master list of all GPU cores that are supported by this
+  * driver.
+@@ -255,7 +250,7 @@
+ };
+ 
+ /* Nice level for the higher priority GPU start thread */
+-static unsigned int _wake_nice = -7;
++static int _wake_nice = -7;
+ 
+ /* Number of milliseconds to stay active active after a wake on touch */
+ static unsigned int _wake_timeout = 100;
+@@ -358,6 +353,10 @@
+ 	{
+ 		.flags = INPUT_DEVICE_ID_MATCH_EVBIT,
+ 		.evbit = { BIT_MASK(EV_ABS) },
++		/* assumption: MT_.._X & MT_.._Y are in the same long */
++		.absbit = { [BIT_WORD(ABS_MT_POSITION_X)] =
++				BIT_MASK(ABS_MT_POSITION_X) |
++				BIT_MASK(ABS_MT_POSITION_Y) },
+ 	},
+ 	{ },
+ };
+@@ -1933,9 +1932,6 @@
+ 	int i;
+ 	int ret;
+ 
+-	/* Make a high priority workqueue for starting the GPU */
+-	adreno_wq = alloc_workqueue("adreno", WQ_HIGHPRI | WQ_UNBOUND, 1);
+-
+ 	kgsl_pwrctrl_set_state(device, KGSL_STATE_INIT);
+ 	/*
+ 	 * initialization only needs to be done once initially until
+@@ -2121,74 +2117,31 @@
+ 	return status;
+ }
+ 
+-static int _status;
+-
+-/**
+- * _adreno_start_work() - Work handler for the low latency adreno_start
+- * @work: Pointer to the work_struct for
+- *
+- * The work callbak for the low lantecy GPU start - this executes the core
+- * _adreno_start function in the workqueue.
+- */
+-static void adreno_start_work(struct work_struct *work)
+-{
+-	struct adreno_device *adreno_dev = container_of(work,
+-		struct adreno_device, start_work);
+-	struct kgsl_device *device = &adreno_dev->dev;
+-
+-	/* Nice ourselves to be higher priority but not too high priority */
+-	set_user_nice(current, _wake_nice);
+-
+-	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+-	/*
+-	 *  If adreno start is already called, no need to call it again
+-	 *  it can lead to unpredictable behavior if we try to start
+-	 *  the device that is already started.
+-	 *  Below is the sequence of events that can go bad without the check
+-	 *  1) thread 1 calls adreno_start to be scheduled on high priority wq
+-	 *  2) thread 2 calls adreno_start with normal priority
+-	 *  3) thread 1 after checking the device to be in slumber state gives
+-	 *     up mutex to be scheduled on high priority wq
+-	 *  4) thread 2 after checking the device to be in slumber state gets
+-	 *     the mutex and finishes adreno_start before thread 1 is scheduled
+-	 *     on high priority wq.
+-	 *  5) thread 1 gets scheduled on high priority wq and executes
+-	 *     adreno_start again. This leads to unpredictable behavior.
+-	 */
+-	if (!test_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv))
+-		_status = _adreno_start(adreno_dev);
+-	else
+-		_status = 0;
+-	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+-}
+-
+ /**
+  * adreno_start() - Power up and initialize the GPU
+  * @device: Pointer to the KGSL device to power up
+  * @priority:  Boolean flag to specify of the start should be scheduled in a low
+  * latency work queue
+  *
+- * Power up the GPU and initialize it.  If priority is specified then queue the
+- * start function in a high priority queue for lower latency.
++ * Power up the GPU and initialize it.  If priority is specified then elevate
++ * the thread priority for the duration of the start operation
++
+  */
+ static int adreno_start(struct kgsl_device *device, int priority)
+ {
+ 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
++	int nice = task_nice(current);
++	int ret;
+ 
+-	/* No priority (normal latency) call the core start function directly */
+-	if (!priority)
+-		return _adreno_start(adreno_dev);
++	if (priority && (_wake_nice < nice))
++		set_user_nice(current, _wake_nice);
+ 
+-	/*
+-	 * If priority is specified (low latency) then queue the work in a
+-	 * higher priority work queue and wait for it to finish
+-	 */
+-	queue_work(adreno_wq, &adreno_dev->start_work);
+-	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+-	flush_work(&adreno_dev->start_work);
+-	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
++	ret = _adreno_start(adreno_dev);
++
++	if (priority)
++		set_user_nice(current, nice);
+ 
+-	return _status;
++	return ret;
+ }
+ 
+ static int adreno_stop(struct kgsl_device *device)
+@@ -3543,6 +3496,7 @@
+ 	.drawctxt_create = adreno_drawctxt_create,
+ 	.drawctxt_detach = adreno_drawctxt_detach,
+ 	.drawctxt_destroy = adreno_drawctxt_destroy,
++	.drawctxt_dump = adreno_drawctxt_dump,
+ 	.setproperty = adreno_setproperty,
+ 	.postmortem_dump = adreno_dump,
+ 	.drawctxt_sched = adreno_drawctxt_sched,
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/adreno_dispatch.c b/drivers/gpu/msm/adreno_dispatch.c
+--- a/drivers/gpu/msm/adreno_dispatch.c	2016-01-06 15:00:41.634590493 -0500
++++ b/drivers/gpu/msm/adreno_dispatch.c	2015-12-01 05:54:58.000000000 -0500
+@@ -1,4 +1,4 @@
+-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
++/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License version 2 and
+@@ -145,6 +145,27 @@
+ 	return ret;
+ }
+ 
++static int _check_context_queue(struct adreno_context *drawctxt)
++{
++	int ret;
++
++	spin_lock(&drawctxt->lock);
++
++	/*
++	 * Wake up if there is room in the context or if the whole thing got
++	 * invalidated while we were asleep
++	 */
++
++	if (drawctxt->state == ADRENO_CONTEXT_STATE_INVALID)
++		ret = 1;
++	else
++		ret = drawctxt->queued < _context_cmdqueue_size ? 1 : 0;
++
++	spin_unlock(&drawctxt->lock);
++
++	return ret;
++}
++
+ /**
+  * adreno_dispatcher_get_cmdbatch() - Get a new command from a context queue
+  * @drawctxt: Pointer to the adreno draw context
+@@ -157,7 +178,7 @@
+ 	struct kgsl_cmdbatch *cmdbatch = NULL;
+ 	int pending;
+ 
+-	mutex_lock(&drawctxt->mutex);
++	spin_lock(&drawctxt->lock);
+ 	if (drawctxt->cmdqueue_head != drawctxt->cmdqueue_tail) {
+ 		cmdbatch = drawctxt->cmdqueue[drawctxt->cmdqueue_head];
+ 
+@@ -202,7 +223,7 @@
+ 	}
+ 
+ done:
+-	mutex_unlock(&drawctxt->mutex);
++	spin_unlock(&drawctxt->lock);
+ 
+ 	return cmdbatch;
+ }
+@@ -221,13 +242,17 @@
+ 		struct adreno_context *drawctxt, struct kgsl_cmdbatch *cmdbatch)
+ {
+ 	unsigned int prev;
+-	mutex_lock(&drawctxt->mutex);
++	struct kgsl_device *device;
++	spin_lock(&drawctxt->lock);
+ 
+ 	if (kgsl_context_detached(&drawctxt->base) ||
+ 		drawctxt->state == ADRENO_CONTEXT_STATE_INVALID) {
+-		mutex_unlock(&drawctxt->mutex);
++		spin_unlock(&drawctxt->lock);
++		device = cmdbatch->device;
+ 		/* get rid of this cmdbatch since the context is bad */
++		kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 		kgsl_cmdbatch_destroy(cmdbatch);
++		kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 		return -EINVAL;
+ 	}
+ 
+@@ -247,7 +272,7 @@
+ 
+ 	/* Reset the command queue head to reflect the newly requeued change */
+ 	drawctxt->cmdqueue_head = prev;
+-	mutex_unlock(&drawctxt->mutex);
++	spin_unlock(&drawctxt->lock);
+ 	return 0;
+ }
+ 
+@@ -378,6 +403,7 @@
+ 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
+ 	int count = 0;
+ 	int requeued = 0;
++	unsigned int timestamp;
+ 
+ 	/*
+ 	 * Each context can send a specific number of command batches per cycle
+@@ -413,10 +439,15 @@
+ 		 */
+ 
+ 		if (cmdbatch->flags & KGSL_CONTEXT_SYNC) {
++			struct kgsl_device *device = cmdbatch->device;
++			kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 			kgsl_cmdbatch_destroy(cmdbatch);
++			kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 			continue;
+ 		}
+ 
++		timestamp = cmdbatch->timestamp;
++
+ 		ret = sendcmd(adreno_dev, cmdbatch);
+ 
+ 		/*
+@@ -432,16 +463,17 @@
+ 			break;
+ 		}
+ 
++		drawctxt->submitted_timestamp = timestamp;
++
+ 		count++;
+ 	}
+ 
+ 	/*
+-	 * If the context successfully submitted commands there will be room
+-	 * in the context queue so wake up any snoozing threads that want to
+-	 * submit commands
++	 * Wake up any snoozing threads if we have consumed any real commands
++	 * or marker commands and we have room in the context queue.
+ 	 */
+ 
+-	if (count)
++	if (_check_context_queue(drawctxt))
+ 		wake_up_all(&drawctxt->wq);
+ 
+ 	/*
+@@ -564,27 +596,6 @@
+ 	return ret;
+ }
+ 
+-static int _check_context_queue(struct adreno_context *drawctxt)
+-{
+-	int ret;
+-
+-	mutex_lock(&drawctxt->mutex);
+-
+-	/*
+-	 * Wake up if there is room in the context or if the whole thing got
+-	 * invalidated while we were asleep
+-	 */
+-
+-	if (drawctxt->state == ADRENO_CONTEXT_STATE_INVALID)
+-		ret = 1;
+-	else
+-		ret = drawctxt->queued < _context_cmdqueue_size ? 1 : 0;
+-
+-	mutex_unlock(&drawctxt->mutex);
+-
+-	return ret;
+-}
+-
+ /**
+  * get_timestamp() - Return the next timestamp for the context
+  * @drawctxt - Pointer to an adreno draw context struct
+@@ -635,10 +646,10 @@
+ {
+ 	int ret;
+ 
+-	mutex_lock(&drawctxt->mutex);
++	spin_lock(&drawctxt->lock);
+ 
+ 	if (kgsl_context_detached(&drawctxt->base)) {
+-		mutex_unlock(&drawctxt->mutex);
++		spin_unlock(&drawctxt->lock);
+ 		return -EINVAL;
+ 	}
+ 
+@@ -679,17 +690,17 @@
+ 
+ 	while (drawctxt->queued >= _context_cmdqueue_size) {
+ 		trace_adreno_drawctxt_sleep(drawctxt);
+-		mutex_unlock(&drawctxt->mutex);
++		spin_unlock(&drawctxt->lock);
+ 
+ 		ret = wait_event_interruptible_timeout(drawctxt->wq,
+ 			_check_context_queue(drawctxt),
+ 			msecs_to_jiffies(_context_queue_wait));
+ 
+-		mutex_lock(&drawctxt->mutex);
++		spin_lock(&drawctxt->lock);
+ 		trace_adreno_drawctxt_wake(drawctxt);
+ 
+ 		if (ret <= 0) {
+-			mutex_unlock(&drawctxt->mutex);
++			spin_unlock(&drawctxt->lock);
+ 			return (ret == 0) ? -ETIMEDOUT : (int) ret;
+ 		}
+ 	}
+@@ -699,22 +710,26 @@
+ 	 */
+ 
+ 	if (drawctxt->state == ADRENO_CONTEXT_STATE_INVALID) {
+-		mutex_unlock(&drawctxt->mutex);
++		spin_unlock(&drawctxt->lock);
+ 		return -EDEADLK;
+ 	}
+ 	if (kgsl_context_detached(&drawctxt->base)) {
+-		mutex_unlock(&drawctxt->mutex);
++		spin_unlock(&drawctxt->lock);
+ 		return -EINVAL;
+ 	}
+ 
+ 	ret = get_timestamp(drawctxt, cmdbatch, timestamp);
+ 	if (ret) {
+-		mutex_unlock(&drawctxt->mutex);
++		spin_unlock(&drawctxt->lock);
+ 		return ret;
+ 	}
+ 
+ 	cmdbatch->timestamp = *timestamp;
+ 
++	/* SYNC commands have timestamp 0 and will get optimized out anyway */
++	if (!(cmdbatch->flags & KGSL_CONTEXT_SYNC))
++		drawctxt->queued_timestamp = *timestamp;
++
+ 	/*
+ 	 * Set the fault tolerance policy for the command batch - assuming the
+ 	 * context hasn't disabled FT use the current device policy
+@@ -734,7 +749,7 @@
+ 	trace_adreno_cmdbatch_queued(cmdbatch, drawctxt->queued);
+ 
+ 
+-	mutex_unlock(&drawctxt->mutex);
++	spin_unlock(&drawctxt->lock);
+ 
+ 	/* Add the context to the dispatcher pending list */
+ 	dispatcher_queue_context(adreno_dev, drawctxt);
+@@ -922,11 +937,8 @@
+ 			drawctxt->state == ADRENO_CONTEXT_STATE_INVALID) {
+ 			replay[i] = NULL;
+ 
+-			kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 			kgsl_cancel_events_timestamp(device, cmd->context,
+ 				cmd->timestamp);
+-			kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+-
+ 			kgsl_cmdbatch_destroy(cmd);
+ 		}
+ 	}
+@@ -1077,12 +1089,14 @@
+ 
+ 	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 
++
+ 	/* Allocate memory to store the inflight commands */
+ 	replay = kzalloc(sizeof(*replay) * dispatcher->inflight, GFP_KERNEL);
+ 
+ 	if (replay == NULL) {
+ 		unsigned int ptr = dispatcher->head;
+ 
++		kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 		/* Recovery failed - mark everybody guilty */
+ 		mark_guilty_context(device, 0);
+ 
+@@ -1102,6 +1116,7 @@
+ 		 */
+ 
+ 		count = 0;
++		kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 		goto replay;
+ 	}
+ 
+@@ -1159,7 +1174,9 @@
+ 			cmdbatch->context->id, cmdbatch->timestamp);
+ 
+ 		mark_guilty_context(device, cmdbatch->context->id);
++		kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 		adreno_drawctxt_invalidate(device, cmdbatch->context);
++		kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 	}
+ 
+ 	/*
+@@ -1268,7 +1285,9 @@
+ 	mark_guilty_context(device, cmdbatch->context->id);
+ 
+ 	/* Invalidate the context */
++	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 	adreno_drawctxt_invalidate(device, cmdbatch->context);
++	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 
+ 
+ replay:
+@@ -1287,8 +1306,10 @@
+ 	/* If adreno_reset() fails then what hope do we have for the future? */
+ 	BUG_ON(ret);
+ 
++	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 	/* Remove any pending command batches that have been invalidated */
+ 	remove_invalidated_cmdbatches(device, replay, count);
++	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 
+ 	/* Replay the pending command buffers */
+ 	for (i = 0; i < count; i++) {
+@@ -1330,9 +1351,11 @@
+ 			/* Mark this context as guilty (failed recovery) */
+ 			mark_guilty_context(device, replay[i]->context->id);
+ 
++			kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 			adreno_drawctxt_invalidate(device, replay[i]->context);
+ 			remove_invalidated_cmdbatches(device, &replay[i],
+ 				count - i);
++			kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 		}
+ 	}
+ 
+@@ -1440,8 +1463,10 @@
+ 			dispatcher->head = CMDQUEUE_NEXT(dispatcher->head,
+ 				ADRENO_DISPATCH_CMDQUEUE_SIZE);
+ 
++			kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 			/* Destroy the retired command batch */
+ 			kgsl_cmdbatch_destroy(cmdbatch);
++			kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 
+ 			/* Update the expire time for the next command batch */
+ 
+@@ -1686,16 +1711,19 @@
+ void adreno_dispatcher_close(struct adreno_device *adreno_dev)
+ {
+ 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
++	struct kgsl_device *device = &adreno_dev->dev;
+ 
+ 	mutex_lock(&dispatcher->mutex);
+ 	del_timer_sync(&dispatcher->timer);
+ 	del_timer_sync(&dispatcher->fault_timer);
+ 
++	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 	while (dispatcher->head != dispatcher->tail) {
+ 		kgsl_cmdbatch_destroy(dispatcher->cmdqueue[dispatcher->head]);
+ 		dispatcher->head = (dispatcher->head + 1)
+ 			% ADRENO_DISPATCH_CMDQUEUE_SIZE;
+ 	}
++	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 
+ 	mutex_unlock(&dispatcher->mutex);
+ 
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/adreno_drawctxt.c b/drivers/gpu/msm/adreno_drawctxt.c
+--- a/drivers/gpu/msm/adreno_drawctxt.c	2016-01-06 15:00:41.634590493 -0500
++++ b/drivers/gpu/msm/adreno_drawctxt.c	2015-12-01 05:54:53.000000000 -0500
+@@ -179,6 +179,56 @@
+ }
+ 
+ /**
++ * adreno_drawctxt_dump() - dump information about a draw context
++ * @device: KGSL device that owns the context
++ * @context: KGSL context to dump information about
++ *
++ * Dump specific information about the context to the kernel log.  Used for
++ * fence timeout callbacks
++ */
++void adreno_drawctxt_dump(struct kgsl_device *device,
++		struct kgsl_context *context)
++{
++	unsigned int queue, start, retire;
++	struct adreno_context *drawctxt = ADRENO_CONTEXT(context);
++
++	queue = kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_QUEUED);
++	start = kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_CONSUMED);
++	retire = kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_RETIRED);
++
++	spin_lock(&drawctxt->lock);
++	dev_err(device->dev,
++		"  context[%d]: queue=%d, submit=%d, start=%d, retire=%d\n",
++		context->id, queue, drawctxt->submitted_timestamp,
++		start, retire);
++
++	if (drawctxt->cmdqueue_head != drawctxt->cmdqueue_tail) {
++		struct kgsl_cmdbatch *cmdbatch =
++			drawctxt->cmdqueue[drawctxt->cmdqueue_head];
++
++		if (test_bit(CMDBATCH_FLAG_FENCE_LOG, &cmdbatch->priv)) {
++			dev_err(device->dev,
++				"  possible deadlock. Context %d might be blocked for itself\n",
++				context->id);
++			goto done;
++		}
++
++		spin_lock(&cmdbatch->lock);
++
++		if (!list_empty(&cmdbatch->synclist)) {
++			dev_err(device->dev,
++				"  context[%d] (ts=%d) Active sync points:\n",
++				context->id, cmdbatch->timestamp);
++
++			kgsl_dump_syncpoints(device, cmdbatch);
++		}
++		spin_unlock(&cmdbatch->lock);
++	}
++done:
++	spin_unlock(&drawctxt->lock);
++}
++
++/**
+  * adreno_drawctxt_wait() - sleep until a timestamp expires
+  * @adreno_dev: pointer to the adreno_device struct
+  * @drawctxt: Pointer to the draw context to sleep for
+@@ -317,14 +367,10 @@
+ 	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 
+ 	if (timeout) {
+-		ret = (int) wait_event_timeout(drawctxt->waiting,
++		if (0 == (int) wait_event_timeout(drawctxt->waiting,
+ 			_check_global_timestamp(device, drawctxt, timestamp),
+-			msecs_to_jiffies(timeout));
+-
+-		if (ret == 0)
++			msecs_to_jiffies(timeout)))
+ 			ret = -ETIMEDOUT;
+-		else if (ret > 0)
+-			ret = 0;
+ 	} else {
+ 		wait_event(drawctxt->waiting,
+ 			_check_global_timestamp(device, drawctxt, timestamp));
+@@ -355,11 +401,9 @@
+ 
+ 	trace_adreno_drawctxt_invalidate(drawctxt);
+ 
++	spin_lock(&drawctxt->lock);
+ 	drawctxt->state = ADRENO_CONTEXT_STATE_INVALID;
+ 
+-	/* Clear the pending queue */
+-	mutex_lock(&drawctxt->mutex);
+-
+ 	/*
+ 	 * set the timestamp to the last value since the context is invalidated
+ 	 * and we want the pending events for this context to go away
+@@ -379,18 +423,13 @@
+ 		drawctxt->cmdqueue_head = (drawctxt->cmdqueue_head + 1) %
+ 			ADRENO_CONTEXT_CMDQUEUE_SIZE;
+ 
+-		mutex_unlock(&drawctxt->mutex);
+-
+-		kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 		kgsl_cancel_events_timestamp(device, context,
+ 			cmdbatch->timestamp);
+-		kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 
+ 		kgsl_cmdbatch_destroy(cmdbatch);
+-		mutex_lock(&drawctxt->mutex);
+ 	}
+ 
+-	mutex_unlock(&drawctxt->mutex);
++	spin_unlock(&drawctxt->lock);
+ 
+ 	/* Give the bad news to everybody waiting around */
+ 	wake_up_all(&drawctxt->waiting);
+@@ -439,7 +478,7 @@
+ 	drawctxt->base.flags |= KGSL_CONTEXT_PER_CONTEXT_TS;
+ 	drawctxt->type = (drawctxt->base.flags & KGSL_CONTEXT_TYPE_MASK)
+ 	>> KGSL_CONTEXT_TYPE_SHIFT;
+-	mutex_init(&drawctxt->mutex);
++	spin_lock_init(&drawctxt->lock);
+ 	init_waitqueue_head(&drawctxt->wq);
+ 	init_waitqueue_head(&drawctxt->waiting);
+ 
+@@ -518,7 +557,7 @@
+ 	if (adreno_dev->drawctxt_active == drawctxt)
+ 		adreno_drawctxt_switch(adreno_dev, NULL, 0);
+ 
+-	mutex_lock(&drawctxt->mutex);
++	spin_lock(&drawctxt->lock);
+ 
+ 	while (drawctxt->cmdqueue_head != drawctxt->cmdqueue_tail) {
+ 		struct kgsl_cmdbatch *cmdbatch =
+@@ -527,7 +566,7 @@
+ 		drawctxt->cmdqueue_head = (drawctxt->cmdqueue_head + 1) %
+ 			ADRENO_CONTEXT_CMDQUEUE_SIZE;
+ 
+-		mutex_unlock(&drawctxt->mutex);
++		spin_unlock(&drawctxt->lock);
+ 
+ 		/*
+ 		 * If the context is deteached while we are waiting for
+@@ -543,10 +582,10 @@
+ 		 */
+ 
+ 		kgsl_cmdbatch_destroy(cmdbatch);
+-		mutex_lock(&drawctxt->mutex);
++		spin_lock(&drawctxt->lock);
+ 	}
+ 
+-	mutex_unlock(&drawctxt->mutex);
++	spin_unlock(&drawctxt->lock);
+ 	/*
+ 	 * internal_timestamp is set in adreno_ringbuffer_addcmds,
+ 	 * which holds the device mutex. The entire context destroy
+@@ -555,9 +594,14 @@
+ 	 */
+ 	BUG_ON(!mutex_is_locked(&device->mutex));
+ 
+-	/* Wait for the last global timestamp to pass before continuing */
++	/* Wait for the last global timestamp to pass before continuing.
++	 * The maxumum wait time is 30s, some large IB's can take longer
++	 * than 10s and if hang happens then the time for the context's
++	 * commands to retire will be greater than 10s. 30s should be sufficient
++	 * time to wait for the commands even if a hang happens.
++	 */
+ 	ret = adreno_drawctxt_wait_global(adreno_dev, context,
+-		drawctxt->internal_timestamp, 10 * 1000);
++		drawctxt->internal_timestamp, 30 * 1000);
+ 
+ 	/*
+ 	 * If the wait for global fails then nothing after this point is likely
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/adreno_drawctxt.h b/drivers/gpu/msm/adreno_drawctxt.h
+--- a/drivers/gpu/msm/adreno_drawctxt.h	2016-01-06 15:00:41.634590493 -0500
++++ b/drivers/gpu/msm/adreno_drawctxt.h	2015-12-01 05:54:53.000000000 -0500
+@@ -131,6 +131,8 @@
+  * @queued: Number of commands queued in the cmdqueue
+  * @ops: Context switch functions for this context.
+  * @fault_policy: GFT fault policy set in cmdbatch_skip_cmd();
++ * @queued_timestamp: The last timestamp that was queued on this context
++ * @submitted_timestamp: The last timestamp that was submitted for this context
+  */
+ struct adreno_context {
+ 	struct kgsl_context base;
+@@ -139,7 +141,7 @@
+ 	int state;
+ 	unsigned long priv;
+ 	unsigned int type;
+-	struct mutex mutex;
++	spinlock_t lock;
+ 	struct kgsl_memdesc gpustate;
+ 	unsigned int reg_restore[3];
+ 	unsigned int shader_save[3];
+@@ -179,6 +181,8 @@
+ 
+ 	const struct adreno_context_ops *ops;
+ 	unsigned int fault_policy;
++	unsigned int queued_timestamp;
++	unsigned int submitted_timestamp;
+ };
+ 
+ /**
+@@ -288,4 +292,7 @@
+ 	shadow->size = shadow->pitch * shadow->height * 4;
+ }
+ 
++void adreno_drawctxt_dump(struct kgsl_device *device,
++		struct kgsl_context *context);
++
+ #endif  /* __ADRENO_DRAWCTXT_H */
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/adreno.h b/drivers/gpu/msm/adreno.h
+--- a/drivers/gpu/msm/adreno.h	2016-01-06 15:00:41.632590493 -0500
++++ b/drivers/gpu/msm/adreno.h	2015-12-01 05:54:58.000000000 -0500
+@@ -201,7 +201,6 @@
+ 	struct adreno_dispatcher dispatcher;
+ 	struct adreno_busy_data busy_data;
+ 
+-	struct work_struct start_work;
+ 	struct work_struct input_work;
+ 	unsigned int ram_cycles_lo;
+ };
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/adreno_snapshot.c b/drivers/gpu/msm/adreno_snapshot.c
+--- a/drivers/gpu/msm/adreno_snapshot.c	2016-01-06 15:00:41.635590493 -0500
++++ b/drivers/gpu/msm/adreno_snapshot.c	2015-12-01 05:54:53.000000000 -0500
+@@ -599,11 +599,8 @@
+ 				unsigned int gpuaddr = src[i + 1];
+ 				unsigned int size = src[i + 2];
+ 
+-				ret = parse_ib(device, ptbase, gpuaddr, size);
++				parse_ib(device, ptbase, gpuaddr, size);
+ 
+-				/* If adding the IB failed then stop parsing */
+-				if (ret < 0)
+-					goto done;
+ 			} else {
+ 				ret = ib_parse_type3(device, &src[i], ptbase);
+ 				/*
+@@ -929,10 +926,10 @@
+ 			if ((obj->dwords - i) < type3_pkt_size(*src) + 1)
+ 				continue;
+ 
+-			if (adreno_cmd_is_ib(*src))
+-				ret = parse_ib(device, obj->ptbase, src[1],
++			if (adreno_cmd_is_ib(*src)) {
++				parse_ib(device, obj->ptbase, src[1],
+ 					src[2]);
+-			else
++			} else {
+ 				ret = ib_parse_type3(device, src, obj->ptbase);
+ 
+ 			/* Stop parsing if the type3 decode fails */
+@@ -940,6 +937,7 @@
+ 				break;
+ 		}
+ 	}
++	}
+ 
+ 	return (obj->dwords << 2) + sizeof(*header);
+ }
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/kgsl.c b/drivers/gpu/msm/kgsl.c
+--- a/drivers/gpu/msm/kgsl.c	2016-01-06 15:00:41.635590493 -0500
++++ b/drivers/gpu/msm/kgsl.c	2015-12-01 05:54:59.000000000 -0500
+@@ -471,6 +471,33 @@
+ }
+ 
+ /**
++ * kgsl_context_dump() - dump information about a draw context
++ * @device: KGSL device that owns the context
++ * @context: KGSL context to dump information about
++ *
++ * Dump specific information about the context to the kernel log.  Used for
++ * fence timeout callbacks
++ */
++void kgsl_context_dump(struct kgsl_context *context)
++{
++	struct kgsl_device *device;
++
++	if (_kgsl_context_get(context) == 0)
++		return;
++
++	device = context->device;
++
++	if (kgsl_context_detached(context)) {
++		dev_err(device->dev, "  context[%d]: context detached\n",
++			context->id);
++	} else if (device->ftbl->drawctxt_dump != NULL)
++		device->ftbl->drawctxt_dump(device, context);
++
++	kgsl_context_put(context);
++}
++EXPORT_SYMBOL(kgsl_context_dump);
++
++/**
+  * kgsl_context_init() - helper to initialize kgsl_context members
+  * @dev_priv: the owner of the context
+  * @context: the newly created context struct, should be allocated by
+@@ -1554,8 +1581,42 @@
+ 	struct kref refcount;
+ };
+ 
++void kgsl_dump_syncpoints(struct kgsl_device *device,
++	struct kgsl_cmdbatch *cmdbatch)
++{
++	struct kgsl_cmdbatch_sync_event *event;
++
++	/* Print all the pending sync objects */
++	list_for_each_entry(event, &cmdbatch->synclist, node) {
++
++		switch (event->type) {
++		case KGSL_CMD_SYNCPOINT_TYPE_TIMESTAMP: {
++			unsigned int retired;
++
++			 retired = kgsl_readtimestamp(event->device,
++				event->context, KGSL_TIMESTAMP_RETIRED);
++
++			dev_err(device->dev,
++				"  [timestamp] context %d timestamp %d (retired %d)\n",
++				event->context->id, event->timestamp,
++				retired);
++			break;
++		}
++		case KGSL_CMD_SYNCPOINT_TYPE_FENCE:
++			if (event->handle)
++				dev_err(device->dev, "  fence: [%p] %s\n",
++					event->handle->fence,
++					event->handle->name);
++			else
++				dev_err(device->dev, "  fence: invalid\n");
++			break;
++		}
++	}
++}
++
+ static void _kgsl_cmdbatch_timer(unsigned long data)
+ {
++	struct kgsl_device *device;
+ 	struct kgsl_cmdbatch *cmdbatch = (struct kgsl_cmdbatch *) data;
+ 	struct kgsl_cmdbatch_sync_event *event;
+ 
+@@ -1566,13 +1627,15 @@
+ 	if (list_empty(&cmdbatch->synclist))
+ 		goto done;
+ 
+-	pr_err("kgsl: possible gpu syncpoint deadlock for context %d timestamp %d\n",
++	device = cmdbatch->context->device;
++
++	dev_err(device->dev,
++		"kgsl: possible gpu syncpoint deadlock for context %d timestamp %d\n",
+ 		cmdbatch->context->id, cmdbatch->timestamp);
+-	pr_err(" Active sync points:\n");
++	dev_err(device->dev, " Active sync points:\n");
+ 
+ 	/* Print all the pending sync objects */
+ 	list_for_each_entry(event, &cmdbatch->synclist, node) {
+-
+ 		switch (event->type) {
+ 		case KGSL_CMD_SYNCPOINT_TYPE_TIMESTAMP: {
+ 			unsigned int retired;
+@@ -1580,15 +1643,20 @@
+ 			 retired = kgsl_readtimestamp(event->device,
+ 				event->context, KGSL_TIMESTAMP_RETIRED);
+ 
+-			pr_err("  [timestamp] context %d timestamp %d (retired %d)\n",
+-				event->context->id, event->timestamp,
+-				retired);
++			dev_err(device->dev,
++				"  [timestamp] context %d timestamp %d (retired %d)\n",
++				event->context->id, event->timestamp, retired);
+ 			break;
+ 		}
+ 		case KGSL_CMD_SYNCPOINT_TYPE_FENCE:
+-			pr_err("  fence: [%p] %s\n", event->handle,
+-				(event->handle && event->handle->fence)
+-					? event->handle->fence->name : "NULL");
++			if (event->handle && event->handle->fence) {
++				set_bit(CMDBATCH_FLAG_FENCE_LOG,
++					&cmdbatch->priv);
++				kgsl_sync_fence_log(event->handle->fence);
++				clear_bit(CMDBATCH_FLAG_FENCE_LOG,
++					&cmdbatch->priv);
++			} else
++				dev_err(device->dev, "  fence: invalid\n");
+ 			break;
+ 		}
+ 	}
+@@ -1698,6 +1766,9 @@
+ {
+ 	struct kgsl_cmdbatch_sync_event *event = priv;
+ 
++	trace_syncpoint_timestamp_expire(event->cmdbatch,
++		event->context, event->timestamp);
++
+ 	kgsl_cmdbatch_sync_expire(device, event);
+ 	kgsl_context_put(event->context);
+ 	/* Put events that have signaled */
+@@ -1765,6 +1836,9 @@
+ {
+ 	struct kgsl_cmdbatch_sync_event *event = priv;
+ 
++	trace_syncpoint_fence_expire(event->cmdbatch,
++		event->handle ? event->handle->name : "unknown");
++
+ 	kgsl_cmdbatch_sync_expire(event->device, event);
+ 	/* Put events that have signaled */
+ 	kgsl_cmdbatch_sync_event_put(event);
+@@ -1823,10 +1897,11 @@
+ 	event->handle = kgsl_sync_fence_async_wait(sync->fd,
+ 		kgsl_cmdbatch_sync_fence_func, event);
+ 
+-
+ 	if (IS_ERR_OR_NULL(event->handle)) {
+ 		int ret = PTR_ERR(event->handle);
+ 
++		event->handle = NULL;
++
+ 		/* Failed to add the event to the async callback */
+ 		kgsl_cmdbatch_sync_event_put(event);
+ 
+@@ -1839,9 +1914,18 @@
+ 		/* Event no longer needed by this function */
+ 		kgsl_cmdbatch_sync_event_put(event);
+ 
++		/*
++		 * If ret == 0 the fence was already signaled - print a trace
++		 * message so we can track that
++		 */
++		if (ret == 0)
++			trace_syncpoint_fence_expire(cmdbatch, "signaled");
++
+ 		return ret;
+ 	}
+ 
++	trace_syncpoint_fence(cmdbatch, event->handle->name);
++
+ 	/*
+ 	 * Event was successfully added to the synclist, the async
+ 	 * callback and handle to cancel event has been set.
+@@ -1930,6 +2014,8 @@
+ 
+ 		kgsl_cmdbatch_put(cmdbatch);
+ 		kfree(event);
++	} else {
++		trace_syncpoint_timestamp(cmdbatch, context, sync->timestamp);
+ 	}
+ 
+ done:
+@@ -2225,8 +2311,11 @@
+ 	 * -EPROTO is a "success" error - it just tells the user that the
+ 	 * context had previously faulted
+ 	 */
+-	if (result && result != -EPROTO)
++	if (result && result != -EPROTO) {
++		kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 		kgsl_cmdbatch_destroy(cmdbatch);
++		kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
++	}
+ 
+ done:
+ 	kgsl_context_put(context);
+@@ -2277,8 +2366,11 @@
+ 	 * -EPROTO is a "success" error - it just tells the user that the
+ 	 * context had previously faulted
+ 	 */
+-	if (result && result != -EPROTO)
++	if (result && result != -EPROTO) {
++		kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 		kgsl_cmdbatch_destroy(cmdbatch);
++		kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
++	}
+ 
+ done:
+ 	kgsl_context_put(context);
+@@ -3200,6 +3292,9 @@
+ 	return ret;
+ }
+ 
++/* The largest allowable alignment for a GPU object is 32MB */
++#define KGSL_MAX_ALIGN (32 * SZ_1M)
++
+ /*
+  * The common parts of kgsl_ioctl_gpumem_alloc and kgsl_ioctl_gpumem_alloc_id.
+  */
+@@ -3226,11 +3321,13 @@
+ 	/* Cap the alignment bits to the highest number we can handle */
+ 
+ 	align = (flags & KGSL_MEMALIGN_MASK) >> KGSL_MEMALIGN_SHIFT;
+-	if (align >= 32) {
+-		KGSL_CORE_ERR("Alignment too big, restricting to 2^31\n");
++	if (align >= ilog2(KGSL_MAX_ALIGN)) {
++		KGSL_CORE_ERR("Alignment too large; restricting to %dK\n",
++			KGSL_MAX_ALIGN >> 10);
+ 
+ 		flags &= ~KGSL_MEMALIGN_MASK;
+-		flags |= (31 << KGSL_MEMALIGN_SHIFT) & KGSL_MEMALIGN_MASK;
++		flags |= (ilog2(KGSL_MAX_ALIGN) << KGSL_MEMALIGN_SHIFT) &
++			KGSL_MEMALIGN_MASK;
+ 	}
+ 
+ 	entry = kgsl_mem_entry_create();
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/kgsl_device.h b/drivers/gpu/msm/kgsl_device.h
+--- a/drivers/gpu/msm/kgsl_device.h	2016-01-06 15:00:41.636590493 -0500
++++ b/drivers/gpu/msm/kgsl_device.h	2015-12-01 05:54:53.000000000 -0500
+@@ -126,6 +126,8 @@
+ 						uint32_t *flags);
+ 	int (*drawctxt_detach) (struct kgsl_context *context);
+ 	void (*drawctxt_destroy) (struct kgsl_context *context);
++	void (*drawctxt_dump) (struct kgsl_device *device,
++		struct kgsl_context *context);
+ 	long (*ioctl) (struct kgsl_device_private *dev_priv,
+ 		unsigned int cmd, void *data);
+ 	int (*setproperty) (struct kgsl_device_private *dev_priv,
+@@ -202,12 +204,15 @@
+  * @CMDBATCH_FLAG_SKIP - skip the entire command batch
+  * @CMDBATCH_FLAG_FORCE_PREAMBLE - Force the preamble on for the cmdbatch
+  * @CMDBATCH_FLAG_WFI - Force wait-for-idle for the submission
++ * @CMDBATCH_FLAG_FENCE_LOG - Set if the cmdbatch is dumping fence logs via the
++ * cmdbatch timer - this is used to avoid recursion
+  */
+ 
+ enum kgsl_cmdbatch_priv {
+ 	CMDBATCH_FLAG_SKIP = 0,
+ 	CMDBATCH_FLAG_FORCE_PREAMBLE,
+ 	CMDBATCH_FLAG_WFI,
++	CMDBATCH_FLAG_FENCE_LOG,
+ };
+ 
+ struct kgsl_device {
+@@ -547,6 +552,8 @@
+ 		*context);
+ int kgsl_context_detach(struct kgsl_context *context);
+ 
++void kgsl_context_dump(struct kgsl_context *context);
++
+ int kgsl_memfree_find_entry(pid_t pid, unsigned long *gpuaddr,
+ 	unsigned long *size, unsigned int *flags);
+ 
+@@ -693,6 +700,8 @@
+ {
+ 	kgsl_signal_event(device, context, timestamp, KGSL_EVENT_CANCELLED);
+ }
++void kgsl_dump_syncpoints(struct kgsl_device *device,
++	struct kgsl_cmdbatch *cmdbatch);
+ 
+ void kgsl_cmdbatch_destroy(struct kgsl_cmdbatch *cmdbatch);
+ 
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/kgsl_sharedmem.c b/drivers/gpu/msm/kgsl_sharedmem.c
+--- a/drivers/gpu/msm/kgsl_sharedmem.c	2016-01-06 15:00:41.637590494 -0500
++++ b/drivers/gpu/msm/kgsl_sharedmem.c	2015-12-01 05:54:53.000000000 -0500
+@@ -641,8 +641,12 @@
+ 
+ 	page_size = (align >= ilog2(SZ_64K) && size >= SZ_64K)
+ 			? SZ_64K : PAGE_SIZE;
+-	/* update align flags for what we actually use */
+-	if (page_size != PAGE_SIZE)
++	/*
++	 * The alignment cannot be less than the intended page size - it can be
++	 * larger however to accomodate hardware quirks
++	 */
++
++	if (ilog2(align) < page_size)
+ 		kgsl_memdesc_set_align(memdesc, ilog2(page_size));
+ 
+ 	/*
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/kgsl_sync.c b/drivers/gpu/msm/kgsl_sync.c
+--- a/drivers/gpu/msm/kgsl_sync.c	2016-01-06 15:00:41.637590494 -0500
++++ b/drivers/gpu/msm/kgsl_sync.c	2015-12-01 05:54:53.000000000 -0500
+@@ -22,12 +22,13 @@
+ #include "kgsl_sync.h"
+ 
+ struct sync_pt *kgsl_sync_pt_create(struct sync_timeline *timeline,
+-	unsigned int timestamp)
++	struct kgsl_context *context, unsigned int timestamp)
+ {
+ 	struct sync_pt *pt;
+ 	pt = sync_pt_create(timeline, (int) sizeof(struct kgsl_sync_pt));
+ 	if (pt) {
+ 		struct kgsl_sync_pt *kpt = (struct kgsl_sync_pt *) pt;
++		kpt->context = context;
+ 		kpt->timestamp = timestamp;
+ 	}
+ 	return pt;
+@@ -45,7 +46,7 @@
+ static struct sync_pt *kgsl_sync_pt_dup(struct sync_pt *pt)
+ {
+ 	struct kgsl_sync_pt *kpt = (struct kgsl_sync_pt *) pt;
+-	return kgsl_sync_pt_create(pt->parent, kpt->timestamp);
++	return kgsl_sync_pt_create(pt->parent, kpt->context, kpt->timestamp);
+ }
+ 
+ static int kgsl_sync_pt_has_signaled(struct sync_pt *pt)
+@@ -95,6 +96,38 @@
+ 	kfree(ev);
+ }
+ 
++static int _add_fence_event(struct kgsl_device *device,
++	struct kgsl_context *context, unsigned int timestamp)
++{
++	struct kgsl_fence_event_priv *event;
++	int ret;
++
++	event = kmalloc(sizeof(*event), GFP_KERNEL);
++	if (event == NULL)
++		return -ENOMEM;
++
++	/*
++	 * Increase the refcount for the context to keep it through the
++	 * callback
++	 */
++
++	_kgsl_context_get(context);
++
++	event->context = context;
++	event->timestamp = timestamp;
++	event->context = context;
++
++	ret = kgsl_add_event(device, context->id, timestamp,
++		kgsl_fence_event_cb, event, context->dev_priv);
++
++	if (ret) {
++		kgsl_context_put(context);
++		kfree(event);
++	}
++
++	return ret;
++}
++
+ /**
+  * kgsl_add_fence_event - Create a new fence event
+  * @device - KGSL device to create the event on
+@@ -112,23 +145,19 @@
+ 	u32 context_id, u32 timestamp, void __user *data, int len,
+ 	struct kgsl_device_private *owner)
+ {
+-	struct kgsl_fence_event_priv *event;
+ 	struct kgsl_timestamp_event_fence priv;
+ 	struct kgsl_context *context;
+ 	struct sync_pt *pt;
+ 	struct sync_fence *fence = NULL;
+ 	int ret = -EINVAL;
+ 	char fence_name[sizeof(fence->name)] = {};
++	unsigned int cur;
+ 
+ 	priv.fence_fd = -1;
+ 
+ 	if (len != sizeof(priv))
+ 		return -EINVAL;
+ 
+-	event = kzalloc(sizeof(*event), GFP_KERNEL);
+-	if (event == NULL)
+-		return -ENOMEM;
+-
+ 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
+ 
+ 	context = kgsl_context_get_owner(owner, context_id);
+@@ -136,10 +165,8 @@
+ 	if (context == NULL)
+ 		goto unlock;
+ 
+-	event->context = context;
+-	event->timestamp = timestamp;
++	pt = kgsl_sync_pt_create(context->timeline, context, timestamp);
+ 
+-	pt = kgsl_sync_pt_create(context->timeline, timestamp);
+ 	if (pt == NULL) {
+ 		KGSL_DRV_ERR(device, "kgsl_sync_pt_create failed\n");
+ 		ret = -ENOMEM;
+@@ -169,28 +196,31 @@
+ 	}
+ 	sync_fence_install(fence, priv.fence_fd);
+ 
+-	/* Unlock the mutex before copying to user */
+-	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+-
+-	if (copy_to_user(data, &priv, sizeof(priv))) {
+-		ret = -EFAULT;
+-		goto out;
+-	}
+-
+ 	/*
+-	 * Hold the context ref-count for the event - it will get released in
+-	 * the callback
++	 * If the timestamp hasn't expired yet create an event to trigger it.
++	 * Otherwise, just signal the fence - there is no reason to go through
++	 * the effort of creating a fence we don't need.
+ 	 */
+ 
+-	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
++	cur = kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_RETIRED);
++
++	if (timestamp_cmp(cur, timestamp) >= 0)
++		kgsl_sync_timeline_signal(context->timeline, cur);
++	else {
++		ret = _add_fence_event(device, context, timestamp);
++		if (ret)
++			goto unlock;
++	}
+ 
+-	ret = kgsl_add_event(device, context_id, timestamp,
+-			kgsl_fence_event_cb, event, owner);
++	kgsl_context_put(context);
+ 
++	/* Unlock the mutex before copying to user */
+ 	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+ 
+-	if (ret)
++	if (copy_to_user(data, &priv, sizeof(priv))) {
++		ret = -EFAULT;
+ 		goto out;
++	}
+ 
+ 	return 0;
+ 
+@@ -205,7 +235,6 @@
+ 		sync_fence_put(fence);
+ 
+ 	kgsl_context_put(context);
+-	kfree(event);
+ 	return ret;
+ }
+ 
+@@ -242,6 +271,14 @@
+ 	snprintf(str, size, "%u", kpt->timestamp);
+ }
+ 
++static void kgsl_sync_pt_log(struct sync_pt *sync_pt)
++{
++	struct kgsl_sync_pt *kpt = (struct kgsl_sync_pt *) sync_pt;
++	pr_info("-----\n");
++	kgsl_context_dump(kpt->context);
++	pr_info("-----\n");
++}
++
+ static void kgsl_sync_timeline_release_obj(struct sync_timeline *sync_timeline)
+ {
+ 	/*
+@@ -259,6 +296,7 @@
+ 	.timeline_value_str = kgsl_sync_timeline_value_str,
+ 	.pt_value_str = kgsl_sync_pt_value_str,
+ 	.release_obj = kgsl_sync_timeline_release_obj,
++	.pt_log = kgsl_sync_pt_log,
+ };
+ 
+ int kgsl_sync_timeline_create(struct kgsl_context *context)
+@@ -331,9 +369,13 @@
+ 		sync_fence_put(fence);
+ 		return ERR_PTR(-ENOMEM);
+ 	}
++
+ 	kwaiter->fence = fence;
+ 	kwaiter->priv = priv;
+ 	kwaiter->func = func;
++
++	strlcpy(kwaiter->name, fence->name, sizeof(kwaiter->name));
++
+ 	sync_fence_waiter_init((struct sync_fence_waiter *) kwaiter,
+ 		kgsl_sync_callback);
+ 
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/kgsl_sync.h b/drivers/gpu/msm/kgsl_sync.h
+--- a/drivers/gpu/msm/kgsl_sync.h	2016-01-06 15:00:41.637590494 -0500
++++ b/drivers/gpu/msm/kgsl_sync.h	2015-12-01 05:54:53.000000000 -0500
+@@ -25,19 +25,21 @@
+ 
+ struct kgsl_sync_pt {
+ 	struct sync_pt pt;
++	struct kgsl_context *context;
+ 	unsigned int timestamp;
+ };
+ 
+ struct kgsl_sync_fence_waiter {
+ 	struct sync_fence_waiter waiter;
+ 	struct sync_fence *fence;
++	char name[32];
+ 	void (*func)(void *priv);
+ 	void *priv;
+ };
+ 
+ #if defined(CONFIG_SYNC)
+ struct sync_pt *kgsl_sync_pt_create(struct sync_timeline *timeline,
+-	unsigned int timestamp);
++	struct kgsl_context *context, unsigned int timestamp);
+ void kgsl_sync_pt_destroy(struct sync_pt *pt);
+ int kgsl_add_fence_event(struct kgsl_device *device,
+ 	u32 context_id, u32 timestamp, void __user *data, int len,
+@@ -49,9 +51,14 @@
+ struct kgsl_sync_fence_waiter *kgsl_sync_fence_async_wait(int fd,
+ 	void (*func)(void *priv), void *priv);
+ int kgsl_sync_fence_async_cancel(struct kgsl_sync_fence_waiter *waiter);
++static inline void kgsl_sync_fence_log(struct sync_fence *fence)
++{
++	sync_fence_log(fence);
++}
+ #else
+ static inline struct sync_pt
+-*kgsl_sync_pt_create(struct sync_timeline *timeline, unsigned int timestamp)
++*kgsl_sync_pt_create(struct sync_timeline *timeline,
++	struct kgsl_context *context, unsigned int timestamp)
+ {
+ 	return NULL;
+ }
+@@ -96,6 +103,10 @@
+ 	return 1;
+ }
+ 
++static inline void kgsl_sync_fence_log(struct sync_fence *fence)
++{
++}
++
+ #endif
+ 
+ #endif /* __KGSL_SYNC_H */
+diff -X dontdiff -Nuarb a/drivers/gpu/msm/kgsl_trace.h b/drivers/gpu/msm/kgsl_trace.h
+--- a/drivers/gpu/msm/kgsl_trace.h	2016-01-06 15:00:41.638590494 -0500
++++ b/drivers/gpu/msm/kgsl_trace.h	2015-12-01 05:54:53.000000000 -0500
+@@ -796,13 +796,11 @@
+ 	)
+ );
+ 
+-
+ TRACE_EVENT(kgsl_pwrstats,
+ 	TP_PROTO(struct kgsl_device *device, s64 time,
+ 		struct kgsl_power_stats *pstats),
+ 
+ 	TP_ARGS(device, time, pstats),
+-
+ 	TP_STRUCT__entry(
+ 		__string(device_name, device->name)
+ 		__field(s64, total_time)
+@@ -826,6 +824,61 @@
+ 	)
+ );
+ 
++DECLARE_EVENT_CLASS(syncpoint_timestamp_template,
++	TP_PROTO(struct kgsl_cmdbatch *cmdbatch, struct kgsl_context *context,
++		unsigned int timestamp),
++	TP_ARGS(cmdbatch, context, timestamp),
++	TP_STRUCT__entry(
++		__field(unsigned int, cmdbatch_context_id)
++		__field(unsigned int, context_id)
++		__field(unsigned int, timestamp)
++	),
++	TP_fast_assign(
++		__entry->cmdbatch_context_id = cmdbatch->context->id;
++		__entry->context_id = context->id;
++		__entry->timestamp = timestamp;
++	),
++	TP_printk("ctx=%d sync ctx=%d ts=%d",
++		__entry->cmdbatch_context_id, __entry->context_id,
++		__entry->timestamp)
++);
++
++DEFINE_EVENT(syncpoint_timestamp_template, syncpoint_timestamp,
++	TP_PROTO(struct kgsl_cmdbatch *cmdbatch, struct kgsl_context *context,
++		unsigned int timestamp),
++	TP_ARGS(cmdbatch, context, timestamp)
++);
++
++DEFINE_EVENT(syncpoint_timestamp_template, syncpoint_timestamp_expire,
++	TP_PROTO(struct kgsl_cmdbatch *cmdbatch, struct kgsl_context *context,
++		unsigned int timestamp),
++	TP_ARGS(cmdbatch, context, timestamp)
++);
++
++DECLARE_EVENT_CLASS(syncpoint_fence_template,
++	TP_PROTO(struct kgsl_cmdbatch *cmdbatch, char *name),
++	TP_ARGS(cmdbatch, name),
++	TP_STRUCT__entry(
++		__string(fence_name, name)
++		__field(unsigned int, cmdbatch_context_id)
++	),
++	TP_fast_assign(
++		__entry->cmdbatch_context_id = cmdbatch->context->id;
++		__assign_str(fence_name, name);
++	),
++	TP_printk("ctx=%d fence=%s",
++		__entry->cmdbatch_context_id, __get_str(fence_name))
++);
++
++DEFINE_EVENT(syncpoint_fence_template, syncpoint_fence,
++	TP_PROTO(struct kgsl_cmdbatch *cmdbatch, char *name),
++	TP_ARGS(cmdbatch, name)
++);
++
++DEFINE_EVENT(syncpoint_fence_template, syncpoint_fence_expire,
++	TP_PROTO(struct kgsl_cmdbatch *cmdbatch, char *name),
++	TP_ARGS(cmdbatch, name)
++);
+ 
+ #endif /* _KGSL_TRACE_H */
+ 

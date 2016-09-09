@@ -1,0 +1,1349 @@
+diff --git a/arch/Kconfig b/arch/Kconfig
+index 0a3ffe4..cba3e8a 100644
+--- a/arch/Kconfig
++++ b/arch/Kconfig
+@@ -148,6 +148,9 @@ config HAVE_DMA_CONTIGUOUS
+ config USE_GENERIC_SMP_HELPERS
+ 	bool
+ 
++config GENERIC_SMP_IDLE_THREAD
++       bool
++
+ config HAVE_REGS_AND_STACK_ACCESS_API
+ 	bool
+ 	help
+diff --git a/arch/arm/Kconfig b/arch/arm/Kconfig
+index 6de752f..602227c 100644
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -36,6 +36,7 @@ config ARM
+ 	select CPU_PM if (SUSPEND || CPU_IDLE)
+ 	select GENERIC_PCI_IOMAP
+ 	select HAVE_BPF_JIT if NET
++	select GENERIC_SMP_IDLE_THREAD
+ 	help
+ 	  The ARM series is a line of low-power-consumption RISC chip designs
+ 	  licensed by ARM Ltd and targeted at embedded applications and
+diff --git a/fs/proc/array.c b/fs/proc/array.c
+index f9bd395..2168d6a 100644
+--- a/fs/proc/array.c
++++ b/fs/proc/array.c
+@@ -142,6 +142,7 @@ static const char * const task_state_array[] = {
+ 	"x (dead)",		/*  64 */
+ 	"K (wakekill)",		/* 128 */
+ 	"W (waking)",		/* 256 */
++	"P (parked)",		/* 512 */
+ };
+ 
+ static inline const char *get_task_state(struct task_struct *tsk)
+diff --git a/include/linux/kthread.h b/include/linux/kthread.h
+index 0714b24..8d81664 100644
+--- a/include/linux/kthread.h
++++ b/include/linux/kthread.h
+@@ -14,6 +14,11 @@ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data),
+ 	kthread_create_on_node(threadfn, data, -1, namefmt, ##arg)
+ 
+ 
++struct task_struct *kthread_create_on_cpu(int (*threadfn)(void *data),
++					  void *data,
++					  unsigned int cpu,
++					  const char *namefmt);
++
+ /**
+  * kthread_run - create and wake a thread.
+  * @threadfn: the function to run until signal_pending(current).
+@@ -34,9 +39,13 @@ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data),
+ 
+ void kthread_bind(struct task_struct *k, unsigned int cpu);
+ int kthread_stop(struct task_struct *k);
+-int kthread_should_stop(void);
++bool kthread_should_stop(void);
++bool kthread_should_park(void);
+ bool kthread_freezable_should_stop(bool *was_frozen);
+ void *kthread_data(struct task_struct *k);
++int kthread_park(struct task_struct *k);
++void kthread_unpark(struct task_struct *k);
++void kthread_parkme(void);
+ 
+ int kthreadd(void *unused);
+ extern struct task_struct *kthreadd_task;
+@@ -49,8 +58,6 @@ extern int tsk_fork_get_node(struct task_struct *tsk);
+  * can be queued and flushed using queue/flush_kthread_work()
+  * respectively.  Queued kthread_works are processed by a kthread
+  * running kthread_worker_fn().
+- *
+- * A kthread_work can't be freed while it is executing.
+  */
+ struct kthread_work;
+ typedef void (*kthread_work_func_t)(struct kthread_work *work);
+@@ -59,15 +66,14 @@ struct kthread_worker {
+ 	spinlock_t		lock;
+ 	struct list_head	work_list;
+ 	struct task_struct	*task;
++	struct kthread_work	*current_work;
+ };
+ 
+ struct kthread_work {
+ 	struct list_head	node;
+ 	kthread_work_func_t	func;
+ 	wait_queue_head_t	done;
+-	atomic_t		flushing;
+-	int			queue_seq;
+-	int			done_seq;
++	struct kthread_worker	*worker;
+ };
+ 
+ #define KTHREAD_WORKER_INIT(worker)	{				\
+@@ -79,7 +85,6 @@ struct kthread_work {
+ 	.node = LIST_HEAD_INIT((work).node),				\
+ 	.func = (fn),							\
+ 	.done = __WAIT_QUEUE_HEAD_INITIALIZER((work).done),		\
+-	.flushing = ATOMIC_INIT(0),					\
+ 	}
+ 
+ #define DEFINE_KTHREAD_WORKER(worker)					\
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 21655f6..e987c6b 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -196,9 +196,10 @@ print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
+ #define TASK_DEAD		64
+ #define TASK_WAKEKILL		128
+ #define TASK_WAKING		256
+-#define TASK_STATE_MAX		512
++#define TASK_PARKED		512
++#define TASK_STATE_MAX		1024
+ 
+-#define TASK_STATE_TO_CHAR_STR "RSDTtZXxKW"
++#define TASK_STATE_TO_CHAR_STR "RSDTtZXxKWP"
+ 
+ extern char ___assert_task_state[1 - 2*!!(
+ 		sizeof(TASK_STATE_TO_CHAR_STR)-1 != ilog2(TASK_STATE_MAX)+1)];
+diff --git a/include/linux/smpboot.h b/include/linux/smpboot.h
+new file mode 100644
+index 0000000..13e9296
+--- /dev/null
++++ b/include/linux/smpboot.h
+@@ -0,0 +1,52 @@
++#ifndef _LINUX_SMPBOOT_H
++#define _LINUX_SMPBOOT_H
++
++#include <linux/types.h>
++
++struct task_struct;
++/* Cookie handed to the thread_fn*/
++struct smpboot_thread_data;
++
++/**
++ * struct smp_hotplug_thread - CPU hotplug related thread descriptor
++ * @store:		Pointer to per cpu storage for the task pointers
++ * @list:		List head for core management
++ * @thread_should_run:	Check whether the thread should run or not. Called with
++ *			preemption disabled.
++ * @thread_fn:		The associated thread function
++ * @create:		Optional setup function, called when the thread gets
++ *			created (Not called from the thread context)
++ * @setup:		Optional setup function, called when the thread gets
++ *			operational the first time
++ * @cleanup:		Optional cleanup function, called when the thread
++ *			should stop (module exit)
++ * @park:		Optional park function, called when the thread is
++ *			parked (cpu offline)
++ * @unpark:		Optional unpark function, called when the thread is
++ *			unparked (cpu online)
++ * @pre_unpark:		Optional unpark function, called before the thread is
++ *			unparked (cpu online). This is not guaranteed to be
++ *			called on the target cpu of the thread. Careful!
++ * @selfparking:	Thread is not parked by the park function.
++ * @thread_comm:	The base name of the thread
++ */
++struct smp_hotplug_thread {
++	struct task_struct __percpu	**store;
++	struct list_head		list;
++	int				(*thread_should_run)(unsigned int cpu);
++	void				(*thread_fn)(unsigned int cpu);
++	void				(*create)(unsigned int cpu);
++	void				(*setup)(unsigned int cpu);
++	void				(*cleanup)(unsigned int cpu, bool online);
++	void				(*park)(unsigned int cpu);
++	void				(*unpark)(unsigned int cpu);
++	void				(*pre_unpark)(unsigned int cpu);
++	bool				selfparking;
++	const char			*thread_comm;
++};
++
++int smpboot_register_percpu_thread(struct smp_hotplug_thread *plug_thread);
++void smpboot_unregister_percpu_thread(struct smp_hotplug_thread *plug_thread);
++int smpboot_thread_schedule(void);
++
++#endif
+diff --git a/include/trace/events/sched.h b/include/trace/events/sched.h
+index c549831..b3cc3a0 100644
+--- a/include/trace/events/sched.h
++++ b/include/trace/events/sched.h
+@@ -182,7 +182,7 @@ TRACE_EVENT(sched_switch,
+ 		  __print_flags(__entry->prev_state & (TASK_STATE_MAX-1), "|",
+ 				{ 1, "S"} , { 2, "D" }, { 4, "T" }, { 8, "t" },
+ 				{ 16, "Z" }, { 32, "X" }, { 64, "x" },
+-				{ 128, "W" }) : "R",
++				{ 128, "K" }, { 256, "W" }, { 512, "P" }) : "R",
+ 		__entry->prev_state & TASK_STATE_MAX ? "+" : "",
+ 		__entry->next_comm, __entry->next_pid, __entry->next_prio)
+ );
+diff --git a/kernel/Makefile b/kernel/Makefile
+index cb41b95..5b14853 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -10,7 +10,7 @@ obj-y     = fork.o exec_domain.o panic.o printk.o \
+ 	    kthread.o wait.o kfifo.o sys_ni.o posix-cpu-timers.o mutex.o \
+ 	    hrtimer.o rwsem.o nsproxy.o srcu.o semaphore.o \
+ 	    notifier.o ksysfs.o cred.o \
+-	    async.o range.o groups.o lglock.o
++	    async.o range.o groups.o lglock.o smpboot.o
+ 
+ ifdef CONFIG_FUNCTION_TRACER
+ # Do not trace debug files and internal ftrace files
+diff --git a/kernel/cpu.c b/kernel/cpu.c
+index 745a600..9d973ce 100644
+--- a/kernel/cpu.c
++++ b/kernel/cpu.c
+@@ -19,6 +19,8 @@
+ 
+ #include <trace/events/sched.h>
+ 
++#include "smpboot.h"
++
+ #ifdef CONFIG_SMP
+ /* Serializes the updates to cpu_online_mask, cpu_present_mask */
+ static DEFINE_MUTEX(cpu_add_remove_lock);
+@@ -210,6 +212,8 @@ static int __ref take_cpu_down(void *_param)
+ 		return err;
+ 
+ 	cpu_notify(CPU_DYING | param->mod, param->hcpu);
++	/* Park the stopper thread */
++	kthread_park(current);
+ 	return 0;
+ }
+ 
+@@ -240,12 +244,13 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
+ 				__func__, cpu);
+ 		goto out_release;
+ 	}
++	smpboot_park_threads(cpu);
+ 
+ 	err = __stop_machine(take_cpu_down, &tcd_param, cpumask_of(cpu));
+ 	if (err) {
+ 		/* CPU didn't die: tell everyone.  Can't complain. */
++		smpboot_unpark_threads(cpu);
+ 		cpu_notify_nofail(CPU_DOWN_FAILED | mod, hcpu);
+-
+ 		goto out_release;
+ 	}
+ 	BUG_ON(cpu_online(cpu));
+@@ -302,11 +307,23 @@ static int __cpuinit _cpu_up(unsigned int cpu, int tasks_frozen)
+ 	int ret, nr_calls = 0;
+ 	void *hcpu = (void *)(long)cpu;
+ 	unsigned long mod = tasks_frozen ? CPU_TASKS_FROZEN : 0;
++	struct task_struct *idle;
+ 
+ 	if (cpu_online(cpu) || !cpu_present(cpu))
+ 		return -EINVAL;
+ 
+ 	cpu_hotplug_begin();
++
++	idle = idle_thread_get(cpu);
++	if (IS_ERR(idle)) {
++		ret = PTR_ERR(idle);
++		goto out;
++	}
++
++	ret = smpboot_create_threads(cpu);
++	if (ret)
++		goto out;
++
+ 	ret = __cpu_notify(CPU_UP_PREPARE | mod, hcpu, -1, &nr_calls);
+ 	if (ret) {
+ 		nr_calls--;
+@@ -321,12 +338,16 @@ static int __cpuinit _cpu_up(unsigned int cpu, int tasks_frozen)
+ 		goto out_notify;
+ 	BUG_ON(!cpu_online(cpu));
+ 
++	/* Wake the per cpu threads */
++	smpboot_unpark_threads(cpu);
++
+ 	/* Now call notifier in preparation. */
+ 	cpu_notify(CPU_ONLINE | mod, hcpu);
+ 
+ out_notify:
+ 	if (ret != 0)
+ 		__cpu_notify(CPU_UP_CANCELED | mod, hcpu, nr_calls, NULL);
++out:
+ 	cpu_hotplug_done();
+ 	trace_sched_cpu_hotplug(cpu, ret, 1);
+ 
+diff --git a/kernel/kthread.c b/kernel/kthread.c
+index 3d3de63..3b72b80 100644
+--- a/kernel/kthread.c
++++ b/kernel/kthread.c
+@@ -37,11 +37,20 @@ struct kthread_create_info
+ };
+ 
+ struct kthread {
+-	int should_stop;
++	unsigned long flags;
++	unsigned int cpu;
+ 	void *data;
++	struct completion parked;
+ 	struct completion exited;
+ };
+ 
++enum KTHREAD_BITS {
++	KTHREAD_IS_PER_CPU = 0,
++	KTHREAD_SHOULD_STOP,
++	KTHREAD_SHOULD_PARK,
++	KTHREAD_IS_PARKED,
++};
++
+ #define to_kthread(tsk)	\
+ 	container_of((tsk)->vfork_done, struct kthread, exited)
+ 
+@@ -52,13 +61,29 @@ struct kthread {
+  * and this will return true.  You should then return, and your return
+  * value will be passed through to kthread_stop().
+  */
+-int kthread_should_stop(void)
++bool kthread_should_stop(void)
+ {
+-	return to_kthread(current)->should_stop;
++	return test_bit(KTHREAD_SHOULD_STOP, &to_kthread(current)->flags);
+ }
+ EXPORT_SYMBOL(kthread_should_stop);
+ 
+ /**
++ * kthread_should_park - should this kthread park now?
++ *
++ * When someone calls kthread_park() on your kthread, it will be woken
++ * and this will return true.  You should then do the necessary
++ * cleanup and call kthread_parkme()
++ *
++ * Similar to kthread_should_stop(), but this keeps the thread alive
++ * and in a park position. kthread_unpark() "restarts" the thread and
++ * calls the thread function again.
++ */
++bool kthread_should_park(void)
++{
++	return test_bit(KTHREAD_SHOULD_PARK, &to_kthread(current)->flags);
++}
++
++/**
+  * kthread_freezable_should_stop - should this freezable kthread return now?
+  * @was_frozen: optional out parameter, indicates whether %current was frozen
+  *
+@@ -96,6 +121,24 @@ void *kthread_data(struct task_struct *task)
+ 	return to_kthread(task)->data;
+ }
+ 
++static void __kthread_parkme(struct kthread *self)
++{
++	__set_current_state(TASK_PARKED);
++	while (test_bit(KTHREAD_SHOULD_PARK, &self->flags)) {
++		if (!test_and_set_bit(KTHREAD_IS_PARKED, &self->flags))
++			complete(&self->parked);
++		schedule();
++		__set_current_state(TASK_PARKED);
++	}
++	clear_bit(KTHREAD_IS_PARKED, &self->flags);
++	__set_current_state(TASK_RUNNING);
++}
++
++void kthread_parkme(void)
++{
++	__kthread_parkme(to_kthread(current));
++}
++
+ static int kthread(void *_create)
+ {
+ 	/* Copy data: it's on kthread's stack */
+@@ -105,9 +148,10 @@ static int kthread(void *_create)
+ 	struct kthread self;
+ 	int ret;
+ 
+-	self.should_stop = 0;
++	self.flags = 0;
+ 	self.data = data;
+ 	init_completion(&self.exited);
++	init_completion(&self.parked);
+ 	current->vfork_done = &self.exited;
+ 
+ 	/* OK, tell user we're spawned, wait for stop or wakeup */
+@@ -117,9 +161,11 @@ static int kthread(void *_create)
+ 	schedule();
+ 
+ 	ret = -EINTR;
+-	if (!self.should_stop)
+-		ret = threadfn(data);
+ 
++	if (!test_bit(KTHREAD_SHOULD_STOP, &self.flags)) {
++		__kthread_parkme(&self);
++		ret = threadfn(data);
++	}
+ 	/* we can't just return, we must preserve "self" on stack */
+ 	do_exit(ret);
+ }
+@@ -172,8 +218,7 @@ static void create_kthread(struct kthread_create_info *create)
+  * Returns a task_struct or ERR_PTR(-ENOMEM).
+  */
+ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data),
+-					   void *data,
+-					   int node,
++					   void *data, int node,
+ 					   const char namefmt[],
+ 					   ...)
+ {
+@@ -210,6 +255,18 @@ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data),
+ }
+ EXPORT_SYMBOL(kthread_create_on_node);
+ 
++static void __kthread_bind(struct task_struct *p, unsigned int cpu, long state)
++{
++	/* Must have done schedule() in kthread() before we set_task_cpu */
++	if (!wait_task_inactive(p, state)) {
++		WARN_ON(1);
++		return;
++	}
++	/* It's safe because the task is inactive. */
++	do_set_cpus_allowed(p, cpumask_of(cpu));
++	p->flags |= PF_THREAD_BOUND;
++}
++
+ /**
+  * kthread_bind - bind a just-created kthread to a cpu.
+  * @p: thread created by kthread_create().
+@@ -221,17 +278,114 @@ EXPORT_SYMBOL(kthread_create_on_node);
+  */
+ void kthread_bind(struct task_struct *p, unsigned int cpu)
+ {
+-	/* Must have done schedule() in kthread() before we set_task_cpu */
+-	if (!wait_task_inactive(p, TASK_UNINTERRUPTIBLE)) {
+-		WARN_ON(1);
+-		return;
++	__kthread_bind(p, cpu, TASK_UNINTERRUPTIBLE);
++}
++EXPORT_SYMBOL(kthread_bind);
++
++/**
++ * kthread_create_on_cpu - Create a cpu bound kthread
++ * @threadfn: the function to run until signal_pending(current).
++ * @data: data ptr for @threadfn.
++ * @cpu: The cpu on which the thread should be bound,
++ * @namefmt: printf-style name for the thread. Format is restricted
++ *	     to "name.*%u". Code fills in cpu number.
++ *
++ * Description: This helper function creates and names a kernel thread
++ * The thread will be woken and put into park mode.
++ */
++struct task_struct *kthread_create_on_cpu(int (*threadfn)(void *data),
++					  void *data, unsigned int cpu,
++					  const char *namefmt)
++{
++	struct task_struct *p;
++
++	p = kthread_create_on_node(threadfn, data, cpu_to_node(cpu), namefmt,
++				   cpu);
++	if (IS_ERR(p))
++		return p;
++	set_bit(KTHREAD_IS_PER_CPU, &to_kthread(p)->flags);
++	to_kthread(p)->cpu = cpu;
++	/* Park the thread to get it out of TASK_UNINTERRUPTIBLE state */
++	kthread_park(p);
++	return p;
++}
++
++static struct kthread *task_get_live_kthread(struct task_struct *k)
++{
++	struct kthread *kthread;
++
++	get_task_struct(k);
++	kthread = to_kthread(k);
++	/* It might have exited */
++	barrier();
++	if (k->vfork_done != NULL)
++		return kthread;
++	return NULL;
++}
++
++static void __kthread_unpark(struct task_struct *k, struct kthread *kthread)
++{
++	clear_bit(KTHREAD_SHOULD_PARK, &kthread->flags);
++	/*
++	 * We clear the IS_PARKED bit here as we don't wait
++	 * until the task has left the park code. So if we'd
++	 * park before that happens we'd see the IS_PARKED bit
++	 * which might be about to be cleared.
++	 */
++	if (test_and_clear_bit(KTHREAD_IS_PARKED, &kthread->flags)) {
++		if (test_bit(KTHREAD_IS_PER_CPU, &kthread->flags))
++			__kthread_bind(k, kthread->cpu, TASK_PARKED);
++		wake_up_state(k, TASK_PARKED);
+ 	}
++}
+ 
+-	/* It's safe because the task is inactive. */
+-	do_set_cpus_allowed(p, cpumask_of(cpu));
+-	p->flags |= PF_THREAD_BOUND;
++/**
++ * kthread_unpark - unpark a thread created by kthread_create().
++ * @k:		thread created by kthread_create().
++ *
++ * Sets kthread_should_park() for @k to return false, wakes it, and
++ * waits for it to return. If the thread is marked percpu then its
++ * bound to the cpu again.
++ */
++void kthread_unpark(struct task_struct *k)
++{
++	struct kthread *kthread = task_get_live_kthread(k);
++
++	if (kthread)
++		__kthread_unpark(k, kthread);
++	put_task_struct(k);
++}
++
++/**
++ * kthread_park - park a thread created by kthread_create().
++ * @k: thread created by kthread_create().
++ *
++ * Sets kthread_should_park() for @k to return true, wakes it, and
++ * waits for it to return. This can also be called after kthread_create()
++ * instead of calling wake_up_process(): the thread will park without
++ * calling threadfn().
++ *
++ * Returns 0 if the thread is parked, -ENOSYS if the thread exited.
++ * If called by the kthread itself just the park bit is set.
++ */
++int kthread_park(struct task_struct *k)
++{
++	struct kthread *kthread = task_get_live_kthread(k);
++	int ret = -ENOSYS;
++
++	if (kthread) {
++		if (!test_bit(KTHREAD_IS_PARKED, &kthread->flags)) {
++			set_bit(KTHREAD_SHOULD_PARK, &kthread->flags);
++			if (k != current) {
++				wake_up_process(k);
++				wait_for_completion(&kthread->parked);
++			}
++		}
++		ret = 0;
++	}
++	put_task_struct(k);
++	return ret;
+ }
+-EXPORT_SYMBOL(kthread_bind);
+ 
+ /**
+  * kthread_stop - stop a thread created by kthread_create().
+@@ -250,16 +404,13 @@ EXPORT_SYMBOL(kthread_bind);
+  */
+ int kthread_stop(struct task_struct *k)
+ {
+-	struct kthread *kthread;
++	struct kthread *kthread = task_get_live_kthread(k);
+ 	int ret;
+ 
+ 	trace_sched_kthread_stop(k);
+-	get_task_struct(k);
+-
+-	kthread = to_kthread(k);
+-	barrier(); /* it might have exited */
+-	if (k->vfork_done != NULL) {
+-		kthread->should_stop = 1;
++	if (kthread) {
++		set_bit(KTHREAD_SHOULD_STOP, &kthread->flags);
++		__kthread_unpark(k, kthread);
+ 		wake_up_process(k);
+ 		wait_for_completion(&kthread->exited);
+ 	}
+@@ -360,16 +511,12 @@ int kthread_worker_fn(void *worker_ptr)
+ 					struct kthread_work, node);
+ 		list_del_init(&work->node);
+ 	}
++	worker->current_work = work;
+ 	spin_unlock_irq(&worker->lock);
+ 
+ 	if (work) {
+ 		__set_current_state(TASK_RUNNING);
+ 		work->func(work);
+-		smp_wmb();	/* wmb worker-b0 paired with flush-b1 */
+-		work->done_seq = work->queue_seq;
+-		smp_mb();	/* mb worker-b1 paired with flush-b0 */
+-		if (atomic_read(&work->flushing))
+-			wake_up_all(&work->done);
+ 	} else if (!freezing(current))
+ 		schedule();
+ 
+@@ -378,6 +525,19 @@ int kthread_worker_fn(void *worker_ptr)
+ }
+ EXPORT_SYMBOL_GPL(kthread_worker_fn);
+ 
++/* insert @work before @pos in @worker */
++static void insert_kthread_work(struct kthread_worker *worker,
++			       struct kthread_work *work,
++			       struct list_head *pos)
++{
++	lockdep_assert_held(&worker->lock);
++
++	list_add_tail(&work->node, pos);
++	work->worker = worker;
++	if (likely(worker->task))
++		wake_up_process(worker->task);
++}
++
+ /**
+  * queue_kthread_work - queue a kthread_work
+  * @worker: target kthread_worker
+@@ -395,10 +555,7 @@ bool queue_kthread_work(struct kthread_worker *worker,
+ 
+ 	spin_lock_irqsave(&worker->lock, flags);
+ 	if (list_empty(&work->node)) {
+-		list_add_tail(&work->node, &worker->work_list);
+-		work->queue_seq++;
+-		if (likely(worker->task))
+-			wake_up_process(worker->task);
++		insert_kthread_work(worker, work, &worker->work_list);
+ 		ret = true;
+ 	}
+ 	spin_unlock_irqrestore(&worker->lock, flags);
+@@ -406,6 +563,18 @@ bool queue_kthread_work(struct kthread_worker *worker,
+ }
+ EXPORT_SYMBOL_GPL(queue_kthread_work);
+ 
++struct kthread_flush_work {
++	struct kthread_work	work;
++	struct completion	done;
++};
++
++static void kthread_flush_work_fn(struct kthread_work *work)
++{
++	struct kthread_flush_work *fwork =
++		container_of(work, struct kthread_flush_work, work);
++	complete(&fwork->done);
++}
++
+ /**
+  * flush_kthread_work - flush a kthread_work
+  * @work: work to flush
+@@ -414,39 +583,37 @@ EXPORT_SYMBOL_GPL(queue_kthread_work);
+  */
+ void flush_kthread_work(struct kthread_work *work)
+ {
+-	int seq = work->queue_seq;
++	struct kthread_flush_work fwork = {
++		KTHREAD_WORK_INIT(fwork.work, kthread_flush_work_fn),
++		COMPLETION_INITIALIZER_ONSTACK(fwork.done),
++	};
++	struct kthread_worker *worker;
++	bool noop = false;
+ 
+-	atomic_inc(&work->flushing);
++retry:
++	worker = work->worker;
++	if (!worker)
++		return;
+ 
+-	/*
+-	 * mb flush-b0 paired with worker-b1, to make sure either
+-	 * worker sees the above increment or we see done_seq update.
+-	 */
+-	smp_mb__after_atomic_inc();
++	spin_lock_irq(&worker->lock);
++	if (work->worker != worker) {
++		spin_unlock_irq(&worker->lock);
++		goto retry;
++	}
+ 
+-	/* A - B <= 0 tests whether B is in front of A regardless of overflow */
+-	wait_event(work->done, seq - work->done_seq <= 0);
+-	atomic_dec(&work->flushing);
++	if (!list_empty(&work->node))
++		insert_kthread_work(worker, &fwork.work, work->node.next);
++	else if (worker->current_work == work)
++		insert_kthread_work(worker, &fwork.work, worker->work_list.next);
++	else
++		noop = true;
+ 
+-	/*
+-	 * rmb flush-b1 paired with worker-b0, to make sure our caller
+-	 * sees every change made by work->func().
+-	 */
+-	smp_mb__after_atomic_dec();
+-}
+-EXPORT_SYMBOL_GPL(flush_kthread_work);
+-
+-struct kthread_flush_work {
+-	struct kthread_work	work;
+-	struct completion	done;
+-};
++	spin_unlock_irq(&worker->lock);
+ 
+-static void kthread_flush_work_fn(struct kthread_work *work)
+-{
+-	struct kthread_flush_work *fwork =
+-		container_of(work, struct kthread_flush_work, work);
+-	complete(&fwork->done);
++	if (!noop)
++		wait_for_completion(&fwork.done);
+ }
++EXPORT_SYMBOL_GPL(flush_kthread_work);
+ 
+ /**
+  * flush_kthread_worker - flush all current works on a kthread_worker
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 3dd0570..23fa4e2 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -83,6 +83,7 @@
+ 
+ #include "sched.h"
+ #include "../workqueue_sched.h"
++#include "../smpboot.h"
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/sched.h>
+@@ -7202,6 +7203,7 @@ void __init sched_init(void)
+ 	/* May be allocated at isolcpus cmdline parse time */
+ 	if (cpu_isolated_map == NULL)
+ 		zalloc_cpumask_var(&cpu_isolated_map, GFP_NOWAIT);
++	idle_thread_set_boot_cpu();
+ #endif
+ 	init_sched_fair_class();
+ 
+diff --git a/kernel/smp.c b/kernel/smp.c
+index 3cbd828..0fe8984 100644
+--- a/kernel/smp.c
++++ b/kernel/smp.c
+@@ -13,6 +13,8 @@
+ #include <linux/smp.h>
+ #include <linux/cpu.h>
+ 
++#include "smpboot.h"
++
+ #ifdef CONFIG_USE_GENERIC_SMP_HELPERS
+ static struct {
+ 	struct list_head	queue;
+@@ -670,6 +672,8 @@ void __init smp_init(void)
+ {
+ 	unsigned int cpu;
+ 
++	idle_threads_init();
++
+ 	/* FIXME: This should be done in userspace --RR */
+ 	for_each_present_cpu(cpu) {
+ 		if (num_online_cpus() >= setup_max_cpus)
+diff --git a/kernel/smpboot.c b/kernel/smpboot.c
+new file mode 100644
+index 0000000..02fc5c9
+--- /dev/null
++++ b/kernel/smpboot.c
+@@ -0,0 +1,313 @@
++/*
++ * Common SMP CPU bringup/teardown functions
++ */
++#include <linux/cpu.h>
++#include <linux/err.h>
++#include <linux/smp.h>
++#include <linux/init.h>
++#include <linux/list.h>
++#include <linux/slab.h>
++#include <linux/sched.h>
++#include <linux/export.h>
++#include <linux/percpu.h>
++#include <linux/kthread.h>
++#include <linux/smpboot.h>
++
++#include "smpboot.h"
++
++#ifdef CONFIG_SMP
++
++#ifdef CONFIG_GENERIC_SMP_IDLE_THREAD
++/*
++ * For the hotplug case we keep the task structs around and reuse
++ * them.
++ */
++static DEFINE_PER_CPU(struct task_struct *, idle_threads);
++
++struct task_struct * __cpuinit idle_thread_get(unsigned int cpu)
++{
++	struct task_struct *tsk = per_cpu(idle_threads, cpu);
++
++	if (!tsk)
++		return ERR_PTR(-ENOMEM);
++	init_idle(tsk, cpu);
++	return tsk;
++}
++
++void __init idle_thread_set_boot_cpu(void)
++{
++	per_cpu(idle_threads, smp_processor_id()) = current;
++}
++
++/**
++ * idle_init - Initialize the idle thread for a cpu
++ * @cpu:	The cpu for which the idle thread should be initialized
++ *
++ * Creates the thread if it does not exist.
++ */
++static inline void idle_init(unsigned int cpu)
++{
++	struct task_struct *tsk = per_cpu(idle_threads, cpu);
++
++	if (!tsk) {
++		tsk = fork_idle(cpu);
++		if (IS_ERR(tsk))
++			pr_err("SMP: fork_idle() failed for CPU %u\n", cpu);
++		else
++			per_cpu(idle_threads, cpu) = tsk;
++	}
++}
++
++/**
++ * idle_threads_init - Initialize idle threads for all cpus
++ */
++void __init idle_threads_init(void)
++{
++	unsigned int cpu, boot_cpu;
++
++	boot_cpu = smp_processor_id();
++
++	for_each_possible_cpu(cpu) {
++		if (cpu != boot_cpu)
++			idle_init(cpu);
++	}
++}
++#endif
++
++#endif /* #ifdef CONFIG_SMP */
++
++static LIST_HEAD(hotplug_threads);
++static DEFINE_MUTEX(smpboot_threads_lock);
++
++struct smpboot_thread_data {
++	unsigned int			cpu;
++	unsigned int			status;
++	struct smp_hotplug_thread	*ht;
++};
++
++enum {
++	HP_THREAD_NONE = 0,
++	HP_THREAD_ACTIVE,
++	HP_THREAD_PARKED,
++};
++
++/**
++ * smpboot_thread_fn - percpu hotplug thread loop function
++ * @data:	thread data pointer
++ *
++ * Checks for thread stop and park conditions. Calls the necessary
++ * setup, cleanup, park and unpark functions for the registered
++ * thread.
++ *
++ * Returns 1 when the thread should exit, 0 otherwise.
++ */
++static int smpboot_thread_fn(void *data)
++{
++	struct smpboot_thread_data *td = data;
++	struct smp_hotplug_thread *ht = td->ht;
++
++	while (1) {
++		set_current_state(TASK_INTERRUPTIBLE);
++		preempt_disable();
++		if (kthread_should_stop()) {
++			set_current_state(TASK_RUNNING);
++			preempt_enable();
++			if (ht->cleanup)
++				ht->cleanup(td->cpu, cpu_online(td->cpu));
++			kfree(td);
++			return 0;
++		}
++
++		if (kthread_should_park()) {
++			__set_current_state(TASK_RUNNING);
++			preempt_enable();
++			if (ht->park && td->status == HP_THREAD_ACTIVE) {
++				BUG_ON(td->cpu != smp_processor_id());
++				ht->park(td->cpu);
++				td->status = HP_THREAD_PARKED;
++			}
++			kthread_parkme();
++			/* We might have been woken for stop */
++			continue;
++		}
++
++		BUG_ON(td->cpu != smp_processor_id());
++
++		/* Check for state change setup */
++		switch (td->status) {
++		case HP_THREAD_NONE:
++			preempt_enable();
++			if (ht->setup)
++				ht->setup(td->cpu);
++			td->status = HP_THREAD_ACTIVE;
++			preempt_disable();
++			break;
++		case HP_THREAD_PARKED:
++			preempt_enable();
++			if (ht->unpark)
++				ht->unpark(td->cpu);
++			td->status = HP_THREAD_ACTIVE;
++			preempt_disable();
++			break;
++		}
++
++		if (!ht->thread_should_run(td->cpu)) {
++			preempt_enable();
++			schedule();
++		} else {
++			set_current_state(TASK_RUNNING);
++			preempt_enable();
++			ht->thread_fn(td->cpu);
++		}
++	}
++}
++
++static int
++__smpboot_create_thread(struct smp_hotplug_thread *ht, unsigned int cpu)
++{
++	struct task_struct *tsk = *per_cpu_ptr(ht->store, cpu);
++	struct smpboot_thread_data *td;
++
++	if (tsk)
++		return 0;
++
++	td = kzalloc_node(sizeof(*td), GFP_KERNEL, cpu_to_node(cpu));
++	if (!td)
++		return -ENOMEM;
++	td->cpu = cpu;
++	td->ht = ht;
++
++	tsk = kthread_create_on_cpu(smpboot_thread_fn, td, cpu,
++				    ht->thread_comm);
++	if (IS_ERR(tsk)) {
++		kfree(td);
++		return PTR_ERR(tsk);
++	}
++	get_task_struct(tsk);
++	*per_cpu_ptr(ht->store, cpu) = tsk;
++	if (ht->create) {
++		/*
++		 * Make sure that the task has actually scheduled out
++		 * into park position, before calling the create
++		 * callback. At least the migration thread callback
++		 * requires that the task is off the runqueue.
++		 */
++		if (!wait_task_inactive(tsk, TASK_PARKED))
++			WARN_ON(1);
++		else
++			ht->create(cpu);
++	}
++	return 0;
++}
++
++int smpboot_create_threads(unsigned int cpu)
++{
++	struct smp_hotplug_thread *cur;
++	int ret = 0;
++
++	mutex_lock(&smpboot_threads_lock);
++	list_for_each_entry(cur, &hotplug_threads, list) {
++		ret = __smpboot_create_thread(cur, cpu);
++		if (ret)
++			break;
++	}
++	mutex_unlock(&smpboot_threads_lock);
++	return ret;
++}
++
++static void smpboot_unpark_thread(struct smp_hotplug_thread *ht, unsigned int cpu)
++{
++	struct task_struct *tsk = *per_cpu_ptr(ht->store, cpu);
++
++	if (ht->pre_unpark)
++		ht->pre_unpark(cpu);
++	kthread_unpark(tsk);
++}
++
++void smpboot_unpark_threads(unsigned int cpu)
++{
++	struct smp_hotplug_thread *cur;
++
++	mutex_lock(&smpboot_threads_lock);
++	list_for_each_entry(cur, &hotplug_threads, list)
++		smpboot_unpark_thread(cur, cpu);
++	mutex_unlock(&smpboot_threads_lock);
++}
++
++static void smpboot_park_thread(struct smp_hotplug_thread *ht, unsigned int cpu)
++{
++	struct task_struct *tsk = *per_cpu_ptr(ht->store, cpu);
++
++	if (tsk && !ht->selfparking)
++		kthread_park(tsk);
++}
++
++void smpboot_park_threads(unsigned int cpu)
++{
++	struct smp_hotplug_thread *cur;
++
++	mutex_lock(&smpboot_threads_lock);
++	list_for_each_entry_reverse(cur, &hotplug_threads, list)
++		smpboot_park_thread(cur, cpu);
++	mutex_unlock(&smpboot_threads_lock);
++}
++
++static void smpboot_destroy_threads(struct smp_hotplug_thread *ht)
++{
++	unsigned int cpu;
++
++	/* We need to destroy also the parked threads of offline cpus */
++	for_each_possible_cpu(cpu) {
++		struct task_struct *tsk = *per_cpu_ptr(ht->store, cpu);
++
++		if (tsk) {
++			kthread_stop(tsk);
++			put_task_struct(tsk);
++			*per_cpu_ptr(ht->store, cpu) = NULL;
++		}
++	}
++}
++
++/**
++ * smpboot_register_percpu_thread - Register a per_cpu thread related to hotplug
++ * @plug_thread:	Hotplug thread descriptor
++ *
++ * Creates and starts the threads on all online cpus.
++ */
++int smpboot_register_percpu_thread(struct smp_hotplug_thread *plug_thread)
++{
++	unsigned int cpu;
++	int ret = 0;
++
++	mutex_lock(&smpboot_threads_lock);
++	for_each_online_cpu(cpu) {
++		ret = __smpboot_create_thread(plug_thread, cpu);
++		if (ret) {
++			smpboot_destroy_threads(plug_thread);
++			goto out;
++		}
++		smpboot_unpark_thread(plug_thread, cpu);
++	}
++	list_add(&plug_thread->list, &hotplug_threads);
++out:
++	mutex_unlock(&smpboot_threads_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(smpboot_register_percpu_thread);
++
++/**
++ * smpboot_unregister_percpu_thread - Unregister a per_cpu thread related to hotplug
++ * @plug_thread:	Hotplug thread descriptor
++ *
++ * Stops all threads on all possible cpus.
++ */
++void smpboot_unregister_percpu_thread(struct smp_hotplug_thread *plug_thread)
++{
++	get_online_cpus();
++	mutex_lock(&smpboot_threads_lock);
++	list_del(&plug_thread->list);
++	smpboot_destroy_threads(plug_thread);
++	mutex_unlock(&smpboot_threads_lock);
++	put_online_cpus();
++}
++EXPORT_SYMBOL_GPL(smpboot_unregister_percpu_thread);
+diff --git a/kernel/smpboot.h b/kernel/smpboot.h
+new file mode 100644
+index 0000000..b99b014
+--- /dev/null
++++ b/kernel/smpboot.h
+@@ -0,0 +1,22 @@
++#ifndef SMPBOOT_H
++#define SMPBOOT_H
++
++struct task_struct;
++
++int smpboot_prepare(unsigned int cpu);
++
++#ifdef CONFIG_GENERIC_SMP_IDLE_THREAD
++struct task_struct *idle_thread_get(unsigned int cpu);
++void idle_thread_set_boot_cpu(void);
++void idle_threads_init(void);
++#else
++static inline struct task_struct *idle_thread_get(unsigned int cpu) { return NULL; }
++static inline void idle_thread_set_boot_cpu(void) { }
++static inline void idle_threads_init(unsigned int cpu) { }
++#endif
++
++int smpboot_create_threads(unsigned int cpu);
++void smpboot_park_threads(unsigned int cpu);
++void smpboot_unpark_threads(unsigned int cpu);
++
++#endif
+diff --git a/kernel/stop_machine.c b/kernel/stop_machine.c
+index 2f194e9..c09f295 100644
+--- a/kernel/stop_machine.c
++++ b/kernel/stop_machine.c
+@@ -18,7 +18,7 @@
+ #include <linux/stop_machine.h>
+ #include <linux/interrupt.h>
+ #include <linux/kallsyms.h>
+-
++#include <linux/smpboot.h>
+ #include <linux/atomic.h>
+ 
+ /*
+@@ -37,10 +37,10 @@ struct cpu_stopper {
+ 	spinlock_t		lock;
+ 	bool			enabled;	/* is this stopper enabled? */
+ 	struct list_head	works;		/* list of pending works */
+-	struct task_struct	*thread;	/* stopper thread */
+ };
+ 
+ static DEFINE_PER_CPU(struct cpu_stopper, cpu_stopper);
++static DEFINE_PER_CPU(struct task_struct *, cpu_stopper_task);
+ static bool stop_machine_initialized = false;
+ 
+ static void cpu_stop_init_done(struct cpu_stop_done *done, unsigned int nr_todo)
+@@ -62,16 +62,18 @@ static void cpu_stop_signal_done(struct cpu_stop_done *done, bool executed)
+ }
+ 
+ /* queue @work to @stopper.  if offline, @work is completed immediately */
+-static void cpu_stop_queue_work(struct cpu_stopper *stopper,
+-				struct cpu_stop_work *work)
++static void cpu_stop_queue_work(unsigned int cpu, struct cpu_stop_work *work)
+ {
++	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
++	struct task_struct *p = per_cpu(cpu_stopper_task, cpu);
++
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&stopper->lock, flags);
+ 
+ 	if (stopper->enabled) {
+ 		list_add_tail(&work->list, &stopper->works);
+-		wake_up_process(stopper->thread);
++		wake_up_process(p);
+ 	} else
+ 		cpu_stop_signal_done(work->done, false);
+ 
+@@ -108,7 +110,7 @@ int stop_one_cpu(unsigned int cpu, cpu_stop_fn_t fn, void *arg)
+ 	struct cpu_stop_work work = { .fn = fn, .arg = arg, .done = &done };
+ 
+ 	cpu_stop_init_done(&done, 1);
+-	cpu_stop_queue_work(&per_cpu(cpu_stopper, cpu), &work);
++	cpu_stop_queue_work(cpu, &work);
+ 	wait_for_completion(&done.completion);
+ 	return done.executed ? done.ret : -ENOENT;
+ }
+@@ -130,7 +132,7 @@ void stop_one_cpu_nowait(unsigned int cpu, cpu_stop_fn_t fn, void *arg,
+ 			struct cpu_stop_work *work_buf)
+ {
+ 	*work_buf = (struct cpu_stop_work){ .fn = fn, .arg = arg, };
+-	cpu_stop_queue_work(&per_cpu(cpu_stopper, cpu), work_buf);
++	cpu_stop_queue_work(cpu, work_buf);
+ }
+ 
+ /* static data for stop_cpus */
+@@ -159,8 +161,7 @@ static void queue_stop_cpus_work(const struct cpumask *cpumask,
+ 	 */
+ 	preempt_disable();
+ 	for_each_cpu(cpu, cpumask)
+-		cpu_stop_queue_work(&per_cpu(cpu_stopper, cpu),
+-				    &per_cpu(stop_cpus_work, cpu));
++		cpu_stop_queue_work(cpu, &per_cpu(stop_cpus_work, cpu));
+ 	preempt_enable();
+ }
+ 
+@@ -244,20 +245,25 @@ int try_stop_cpus(const struct cpumask *cpumask, cpu_stop_fn_t fn, void *arg)
+ 	return ret;
+ }
+ 
+-static int cpu_stopper_thread(void *data)
++static int cpu_stop_should_run(unsigned int cpu)
++{
++	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
++	unsigned long flags;
++	int run;
++
++	spin_lock_irqsave(&stopper->lock, flags);
++	run = !list_empty(&stopper->works);
++	spin_unlock_irqrestore(&stopper->lock, flags);
++	return run;
++}
++
++static void cpu_stopper_thread(unsigned int cpu)
+ {
+-	struct cpu_stopper *stopper = data;
++	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
+ 	struct cpu_stop_work *work;
+ 	int ret;
+ 
+ repeat:
+-	set_current_state(TASK_INTERRUPTIBLE);	/* mb paired w/ kthread_stop */
+-
+-	if (kthread_should_stop()) {
+-		__set_current_state(TASK_RUNNING);
+-		return 0;
+-	}
+-
+ 	work = NULL;
+ 	spin_lock_irq(&stopper->lock);
+ 	if (!list_empty(&stopper->works)) {
+@@ -273,8 +279,6 @@ static int cpu_stopper_thread(void *data)
+ 		struct cpu_stop_done *done = work->done;
+ 		char ksym_buf[KSYM_NAME_LEN] __maybe_unused;
+ 
+-		__set_current_state(TASK_RUNNING);
+-
+ 		/* cpu stop callbacks are not allowed to sleep */
+ 		preempt_disable();
+ 
+@@ -290,88 +294,55 @@ static int cpu_stopper_thread(void *data)
+ 					  ksym_buf), arg);
+ 
+ 		cpu_stop_signal_done(done, true);
+-	} else
+-		schedule();
+-
+-	goto repeat;
++		goto repeat;
++	}
+ }
+ 
+ extern void sched_set_stop_task(int cpu, struct task_struct *stop);
+ 
+-/* manage stopper for a cpu, mostly lifted from sched migration thread mgmt */
+-static int __cpuinit cpu_stop_cpu_callback(struct notifier_block *nfb,
+-					   unsigned long action, void *hcpu)
++static void cpu_stop_create(unsigned int cpu)
++{
++	sched_set_stop_task(cpu, per_cpu(cpu_stopper_task, cpu));
++}
++
++static void cpu_stop_park(unsigned int cpu)
+ {
+-	unsigned int cpu = (unsigned long)hcpu;
+ 	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
+-	struct task_struct *p;
+-
+-	switch (action & ~CPU_TASKS_FROZEN) {
+-	case CPU_UP_PREPARE:
+-		BUG_ON(stopper->thread || stopper->enabled ||
+-		       !list_empty(&stopper->works));
+-		p = kthread_create_on_node(cpu_stopper_thread,
+-					   stopper,
+-					   cpu_to_node(cpu),
+-					   "migration/%d", cpu);
+-		if (IS_ERR(p))
+-			return notifier_from_errno(PTR_ERR(p));
+-		get_task_struct(p);
+-		kthread_bind(p, cpu);
+-		sched_set_stop_task(cpu, p);
+-		stopper->thread = p;
+-		break;
+-
+-	case CPU_ONLINE:
+-		/* strictly unnecessary, as first user will wake it */
+-		wake_up_process(stopper->thread);
+-		/* mark enabled */
+-		spin_lock_irq(&stopper->lock);
+-		stopper->enabled = true;
+-		spin_unlock_irq(&stopper->lock);
+-		break;
+-
+-#ifdef CONFIG_HOTPLUG_CPU
+-	case CPU_UP_CANCELED:
+-	case CPU_POST_DEAD:
+-	{
+-		struct cpu_stop_work *work;
+-
+-		sched_set_stop_task(cpu, NULL);
+-		/* kill the stopper */
+-		kthread_stop(stopper->thread);
+-		/* drain remaining works */
+-		spin_lock_irq(&stopper->lock);
+-		list_for_each_entry(work, &stopper->works, list)
+-			cpu_stop_signal_done(work->done, false);
+-		stopper->enabled = false;
+-		spin_unlock_irq(&stopper->lock);
+-		/* release the stopper */
+-		put_task_struct(stopper->thread);
+-		stopper->thread = NULL;
+-		break;
+-	}
+-#endif
+-	}
++	struct cpu_stop_work *work;
++	unsigned long flags;
+ 
+-	return NOTIFY_OK;
++	/* drain remaining works */
++	spin_lock_irqsave(&stopper->lock, flags);
++	list_for_each_entry(work, &stopper->works, list)
++		cpu_stop_signal_done(work->done, false);
++	stopper->enabled = false;
++	spin_unlock_irqrestore(&stopper->lock, flags);
+ }
+ 
+-/*
+- * Give it a higher priority so that cpu stopper is available to other
+- * cpu notifiers.  It currently shares the same priority as sched
+- * migration_notifier.
+- */
+-static struct notifier_block __cpuinitdata cpu_stop_cpu_notifier = {
+-	.notifier_call	= cpu_stop_cpu_callback,
+-	.priority	= 10,
++static void cpu_stop_unpark(unsigned int cpu)
++{
++	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
++
++	spin_lock_irq(&stopper->lock);
++	stopper->enabled = true;
++	spin_unlock_irq(&stopper->lock);
++}
++
++static struct smp_hotplug_thread cpu_stop_threads = {
++	.store			= &cpu_stopper_task,
++	.thread_should_run	= cpu_stop_should_run,
++	.thread_fn		= cpu_stopper_thread,
++	.thread_comm		= "migration/%u",
++	.create			= cpu_stop_create,
++	.setup			= cpu_stop_unpark,
++	.park			= cpu_stop_park,
++	.pre_unpark		= cpu_stop_unpark,
++	.selfparking		= true,
+ };
+ 
+ static int __init cpu_stop_init(void)
+ {
+-	void *bcpu = (void *)(long)smp_processor_id();
+ 	unsigned int cpu;
+-	int err;
+ 
+ 	for_each_possible_cpu(cpu) {
+ 		struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
+@@ -380,15 +351,8 @@ static int __init cpu_stop_init(void)
+ 		INIT_LIST_HEAD(&stopper->works);
+ 	}
+ 
+-	/* start one for the boot cpu */
+-	err = cpu_stop_cpu_callback(&cpu_stop_cpu_notifier, CPU_UP_PREPARE,
+-				    bcpu);
+-	BUG_ON(err != NOTIFY_OK);
+-	cpu_stop_cpu_callback(&cpu_stop_cpu_notifier, CPU_ONLINE, bcpu);
+-	register_cpu_notifier(&cpu_stop_cpu_notifier);
+-
++	BUG_ON(smpboot_register_percpu_thread(&cpu_stop_threads));
+ 	stop_machine_initialized = true;
+-
+ 	return 0;
+ }
+ early_initcall(cpu_stop_init);
+

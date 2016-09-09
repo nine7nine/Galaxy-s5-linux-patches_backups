@@ -1,0 +1,48 @@
+diff -X dontdiff -Nuarb a/drivers/misc/dualwave/dualwave.c b/drivers/misc/dualwave/dualwave.c
+--- a/drivers/misc/dualwave/dualwave.c	2016-01-06 15:00:42.177590522 -0500
++++ b/drivers/misc/dualwave/dualwave.c	2015-12-01 05:55:43.000000000 -0500
+@@ -491,6 +491,7 @@
+ 		kset_put(g_ptDualWaveKset);
+ 		printk(KERN_INFO "khhan ***** failed to kobj init and add %s %d ***** \n", __func__, __LINE__);
+ 		err_status = -3;
++		kfree(g_ptDualWaveKobj);
+ 		return -1;
+ 	}
+ 
+@@ -500,6 +501,7 @@
+ 	{
+ 		printk(KERN_INFO "khhan ***** failed to call kobject_event (%d) %s %d ***** \n", retval, __func__, __LINE__);
+ 		err_status = -4;
++		kfree(g_ptDualWaveKobj);
+ 		return -1;
+ 	}
+ 
+diff -X dontdiff -Nuarb a/drivers/misc/dualwave/Kconfig b/drivers/misc/dualwave/Kconfig
+--- a/drivers/misc/dualwave/Kconfig	1969-12-31 19:00:00.000000000 -0500
++++ b/drivers/misc/dualwave/Kconfig	2015-12-01 05:55:43.000000000 -0500
+@@ -0,0 +1,5 @@
++comment "Altera FPGA firmware download module"
++
++config DUALWAVE
++    bool "DUALWAVE enable"
++	default y
+diff -X dontdiff -Nuarb a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+--- a/drivers/misc/Kconfig	2016-01-06 15:00:42.174590522 -0500
++++ b/drivers/misc/Kconfig	2015-12-01 05:55:43.000000000 -0500
+@@@ -1084,4 +1107,5 @@
+ source "drivers/misc/carma/Kconfig"
+ source "drivers/misc/altera-stapl/Kconfig"
+ source "drivers/misc/modem_if/Kconfig"
++source "drivers/misc/dualwave/Kconfig"
+ endmenu
+diff -X dontdiff -Nuarb a/drivers/misc/Makefile b/drivers/misc/Makefile
+--- a/drivers/misc/Makefile	2016-01-06 15:00:42.174590522 -0500
++++ b/drivers/misc/Makefile	2015-12-01 05:55:43.000000000 -0500
+@@ -99,5 +99,6 @@
+ obj-$(CONFIG_CHECK_SIMSLOT_COUNT) += sim_slot.o
+ obj-$(CONFIG_SEC_MODEM) += modem_if/
+ obj-$(CONFIG_UID_CPUTIME) += uid_cputime.o
++obj-$(CONFIG_DUALWAVE) += dualwave/
+ 
+ obj-y += dualwave/
+

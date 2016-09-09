@@ -1,0 +1,159 @@
+diff -Nur -X dontdiff a/drivers/cpufreq/cpu-boost.c b/drivers/cpufreq/cpu-boost.c
+--- a/drivers/cpufreq/cpu-boost.c	2016-01-24 04:23:18.604412000 -0500
++++ b/drivers/cpufreq/cpu-boost.c	2016-03-24 06:17:51.000000000 -0400
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
++ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License version 2 and
+@@ -34,6 +34,7 @@
+ 	int cpu;
+ 	spinlock_t lock;
+ 	bool pending;
++	atomic_t being_woken;
+ 	int src_cpu;
+ 	unsigned int boost_min;
+ 	unsigned int input_boost_min;
+@@ -207,7 +208,16 @@
+ 	s->pending = true;
+ 	s->src_cpu = (int) arg;
+ 	spin_unlock_irqrestore(&s->lock, flags);
+-	wake_up(&s->sync_wq);
++	/*
++	* Avoid issuing recursive wakeup call, as sync thread itself could be
++	* seen as migrating triggering this notification. Note that sync thread
++	* of a cpu could be running for a short while with its affinity broken
++	* because of CPU hotplug.
++	*/
++	if (!atomic_cmpxchg(&s->being_woken, 0, 1)) {
++		wake_up(&s->sync_wq);
++		atomic_set(&s->being_woken, 0);
++	}
+ 
+ 	return NOTIFY_OK;
+ }
+@@ -347,6 +357,7 @@
+ 		s = &per_cpu(sync_info, cpu);
+ 		s->cpu = cpu;
+ 		init_waitqueue_head(&s->sync_wq);
++		atomic_set(&s->being_woken, 0);
+ 		spin_lock_init(&s->lock);
+ 		INIT_DELAYED_WORK(&s->boost_rem, do_boost_rem);
+ 		INIT_DELAYED_WORK(&s->input_boost_rem, do_input_boost_rem);
+diff -Nur -X dontdiff a/drivers/cpufreq/cpufreq_interactive.c b/drivers/cpufreq/cpufreq_interactive.c
+--- a/drivers/cpufreq/cpufreq_interactive.c	2016-01-24 04:27:36.949492000 -0500
++++ b/drivers/cpufreq/cpufreq_interactive.c	2016-03-24 06:17:51.000000000 -0400
+@@ -1081,8 +1081,8 @@
+ 		ret += sprintf(buf + ret, "%u%s", target_loads[i],
+ 			       i & 0x1 ? ":" : " ");
+ #endif
+-
+-	sprintf(buf + ret - 1, "\n");
++       ret = ret - 1;
++	ret += sprintf(buf + ret, "\n");
+ 	spin_unlock_irqrestore(&target_loads_lock, flags);
+ 	return ret;
+ }
+@@ -1151,7 +1151,8 @@
+ 			       i & 0x1 ? ":" : " ");
+ #endif
+ 
+-	sprintf(buf + ret - 1, "\n");
++       ret = ret - 1;
++	ret += sprintf(buf + ret, "\n");
+ 	spin_unlock_irqrestore(&above_hispeed_delay_lock, flags);
+ 	return ret;
+ }
+diff -Nur -X dontdiff a/drivers/cpufreq/cpufreq_ondemand.c b/drivers/cpufreq/cpufreq_ondemand.c
+--- a/drivers/cpufreq/cpufreq_ondemand.c	2016-01-24 04:23:18.605412000 -0500
++++ b/drivers/cpufreq/cpufreq_ondemand.c	2016-03-24 06:17:51.000000000 -0400
+@@ -4,7 +4,7 @@
+  *  Copyright (C)  2001 Russell King
+  *            (C)  2003 Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>.
+  *                      Jun Nakajima <jun.nakajima@intel.com>
+- *            (c)  2013 The Linux Foundation. All rights reserved.
++ *            (c)  2013, 2015 The Linux Foundation. All rights reserved.
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License version 2 as
+@@ -120,6 +120,7 @@
+ 	struct task_struct *sync_thread;
+ 	wait_queue_head_t sync_wq;
+ 	atomic_t src_sync_cpu;
++	atomic_t being_woken;
+ 	atomic_t sync_enabled;
+ };
+ static DEFINE_PER_CPU(struct cpu_dbs_info_s, od_cpu_dbs_info);
+@@ -1264,7 +1265,16 @@
+ 		&per_cpu(od_cpu_dbs_info, target_cpu);
+ 
+ 	atomic_set(&target_dbs_info->src_sync_cpu, (int)arg);
+-	wake_up(&target_dbs_info->sync_wq);
++	/*
++	* Avoid issuing recursive wakeup call, as sync thread itself could be
++	* seen as migrating triggering this notification. Note that sync thread
++	* of a cpu could be running for a short while with its affinity broken
++	* because of CPU hotplug.
++	*/
++	if (!atomic_cmpxchg(&target_dbs_info->being_woken, 0, 1)) {
++		wake_up(&target_dbs_info->sync_wq);
++		atomic_set(&target_dbs_info->being_woken, 0);
++	}
+ 
+ 	return NOTIFY_OK;
+ }
+@@ -1631,6 +1641,7 @@
+ 		dbs_work->cpu = i;
+ 
+ 		atomic_set(&this_dbs_info->src_sync_cpu, -1);
++		atomic_set(&this_dbs_info->being_woken, 0);
+ 		init_waitqueue_head(&this_dbs_info->sync_wq);
+ 
+ 		this_dbs_info->sync_thread = kthread_run(dbs_sync_thread,
+diff -Nur -X dontdiff a/drivers/cpufreq/cpufreq_stats.c b/drivers/cpufreq/cpufreq_stats.c
+--- a/drivers/cpufreq/cpufreq_stats.c	2016-01-24 04:23:18.605412000 -0500
++++ b/drivers/cpufreq/cpufreq_stats.c	2016-03-24 06:17:51.000000000 -0400
+@@ -509,6 +509,18 @@
+ 	return;
+ }
+ 
++static void free_all_freq_table(void)
++{
++	if (all_freq_table) {
++		if (all_freq_table->freq_table) {
++			kfree(all_freq_table->freq_table);
++			all_freq_table->freq_table = NULL;
++		}
++		kfree(all_freq_table);
++		all_freq_table = NULL;
++	}
++}
++
+ static void add_all_freq_table(unsigned int freq)
+ {
+ 	unsigned int size;
+@@ -725,11 +737,14 @@
+ 	if (ret)
+ 		return ret;
+ 
++	create_all_freq_table();
++
+ 	ret = cpufreq_register_notifier(&notifier_trans_block,
+ 				CPUFREQ_TRANSITION_NOTIFIER);
+ 	if (ret) {
+ 		cpufreq_unregister_notifier(&notifier_policy_block,
+ 				CPUFREQ_POLICY_NOTIFIER);
++		free_all_freq_table();
+ 		return ret;
+ 	}
+ 
+@@ -738,7 +753,6 @@
+ 		cpufreq_update_policy(cpu);
+ 	}
+ 
+-	create_all_freq_table();
+ 	ret = sysfs_create_file(cpufreq_global_kobject,
+ 			&_attr_all_time_in_state.attr);
+ 	if (ret)

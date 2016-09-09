@@ -1,0 +1,284 @@
+From 35702c7a2fcd246a71a9e713e426dfc2a7930404 Mon Sep 17 00:00:00 2001
+From: Mike Lockwood <lockwood@google.com>
+Date: Thu, 29 Jan 2015 13:52:51 -0800
+Subject: [PATCH] USB: gadget: android: Integrate f_midi USB MIDI gadget driver
+
+Change-Id: I4c4b99f9d54314fc31445cf42b825527ca483af9
+Signed-off-by: Mike Lockwood <lockwood@google.com>
+
+Conflicts:
+	drivers/usb/gadget/android.c
+---
+ drivers/usb/gadget/android.c | 62 ++++++++++++++++++++++++++++++++++++++++++++
+ drivers/usb/gadget/f_midi.c  | 48 ++++++++++++++++++++++------------
+ 2 files changed, 94 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/usb/gadget/android.c b/drivers/usb/gadget/android.c
+index 6b0c4c0..4ad4e70 100644
+--- a/drivers/usb/gadget/android.c
++++ b/drivers/usb/gadget/android.c
+@@ -59,6 +59,7 @@
+ #ifdef CONFIG_SND_PCM
+ #include "f_audio_source.c"
+ #endif
++#include "f_midi.c"
+ #include "f_mass_storage.c"
+ #include "u_serial.c"
+ #include "u_sdio.c"
+@@ -125,6 +126,12 @@
+ 
+ #define ANDROID_DEVICE_NODE_NAME_LENGTH 11
+ 
++/* f_midi configuration */
++#define MIDI_INPUT_PORTS    1
++#define MIDI_OUTPUT_PORTS   1
++#define MIDI_BUFFER_SIZE    256
++#define MIDI_QUEUE_LENGTH   32
++
+ struct android_usb_function {
+ 	char *name;
+ 	void *config;
+@@ -2305,6 +2312,60 @@
+ 	.bind_config	= uasp_function_bind_config,
+ };
+ 
++static int midi_function_init(struct android_usb_function *f,
++					struct usb_composite_dev *cdev)
++{
++	struct midi_alsa_config *config;
++
++	config = kzalloc(sizeof(struct midi_alsa_config), GFP_KERNEL);
++	f->config = config;
++	if (!config)
++		return -ENOMEM;
++	config->card = -1;
++	config->device = -1;
++	return 0;
++}
++
++static void midi_function_cleanup(struct android_usb_function *f)
++{
++	kfree(f->config);
++}
++
++static int midi_function_bind_config(struct android_usb_function *f,
++						struct usb_configuration *c)
++{
++	struct midi_alsa_config *config = f->config;
++
++	return f_midi_bind_config(c, SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1,
++			MIDI_INPUT_PORTS, MIDI_OUTPUT_PORTS, MIDI_BUFFER_SIZE,
++			MIDI_QUEUE_LENGTH, config);
++}
++
++static ssize_t midi_alsa_show(struct device *dev,
++		struct device_attribute *attr, char *buf)
++{
++	struct android_usb_function *f = dev_get_drvdata(dev);
++	struct midi_alsa_config *config = f->config;
++
++	/* print ALSA card and device numbers */
++	return sprintf(buf, "%d %d\n", config->card, config->device);
++}
++
++static DEVICE_ATTR(alsa, S_IRUGO, midi_alsa_show, NULL);
++
++static struct device_attribute *midi_function_attributes[] = {
++	&dev_attr_alsa,
++	NULL
++};
++
++static struct android_usb_function midi_function = {
++	.name		= "midi",
++	.init		= midi_function_init,
++	.cleanup	= midi_function_cleanup,
++	.bind_config	= midi_function_bind_config,
++	.attributes	= midi_function_attributes,
++};
++
+ static struct android_usb_function *supported_functions[] = {
+ 	&mbim_function,
+ 	&ecm_qc_function,
+@@ -2340,6 +2401,7 @@
+ #ifdef CONFIG_SND_PCM
+ 	&audio_source_function,
+ #endif
++	&midi_function,
+ 	&uasp_function,
+ 	NULL
+ };
+diff --git a/drivers/usb/gadget/f_midi.c b/drivers/usb/gadget/f_midi.c
+index 71821d1..09a1f94 100644
+--- a/drivers/usb/gadget/f_midi.c
++++ b/drivers/usb/gadget/f_midi.c
+@@ -66,6 +66,11 @@ struct gmidi_in_port {
+ 	uint8_t data[2];
+ };
+ 
++struct midi_alsa_config {
++	int	card;
++	int	device;
++};
++
+ struct f_midi {
+ 	struct usb_function	func;
+ 	struct usb_gadget	*gadget;
+@@ -98,7 +103,7 @@ DECLARE_USB_MIDI_OUT_JACK_DESCRIPTOR(1);
+ DECLARE_USB_MS_ENDPOINT_DESCRIPTOR(16);
+ 
+ /* B.3.1  Standard AC Interface Descriptor */
+-static struct usb_interface_descriptor ac_interface_desc __initdata = {
++static struct usb_interface_descriptor midi_ac_interface_desc /* __initdata */ = {
+ 	.bLength =		USB_DT_INTERFACE_SIZE,
+ 	.bDescriptorType =	USB_DT_INTERFACE,
+ 	/* .bInterfaceNumber =	DYNAMIC */
+@@ -109,7 +114,7 @@ static struct usb_interface_descriptor ac_interface_desc __initdata = {
+ };
+ 
+ /* B.3.2  Class-Specific AC Interface Descriptor */
+-static struct uac1_ac_header_descriptor_1 ac_header_desc __initdata = {
++static struct uac1_ac_header_descriptor_1 midi_ac_header_desc /* __initdata */ = {
+ 	.bLength =		UAC_DT_AC_HEADER_SIZE(1),
+ 	.bDescriptorType =	USB_DT_CS_INTERFACE,
+ 	.bDescriptorSubtype =	USB_MS_HEADER,
+@@ -120,7 +125,7 @@ static struct uac1_ac_header_descriptor_1 ac_header_desc __initdata = {
+ };
+ 
+ /* B.4.1  Standard MS Interface Descriptor */
+-static struct usb_interface_descriptor ms_interface_desc __initdata = {
++static struct usb_interface_descriptor ms_interface_desc /* __initdata */ = {
+ 	.bLength =		USB_DT_INTERFACE_SIZE,
+ 	.bDescriptorType =	USB_DT_INTERFACE,
+ 	/* .bInterfaceNumber =	DYNAMIC */
+@@ -131,7 +136,7 @@ static struct usb_interface_descriptor ms_interface_desc __initdata = {
+ };
+ 
+ /* B.4.2  Class-Specific MS Interface Descriptor */
+-static struct usb_ms_header_descriptor ms_header_desc __initdata = {
++static struct usb_ms_header_descriptor ms_header_desc /* __initdata */ = {
+ 	.bLength =		USB_DT_MS_HEADER_SIZE,
+ 	.bDescriptorType =	USB_DT_CS_INTERFACE,
+ 	.bDescriptorSubtype =	USB_MS_HEADER,
+@@ -734,7 +739,7 @@ static int f_midi_register_card(struct f_midi *midi)
+ 
+ /* MIDI function driver setup/binding */
+ 
+-static int __init
++static int /* __init */
+ f_midi_bind(struct usb_configuration *c, struct usb_function *f)
+ {
+ 	struct usb_descriptor_header **midi_function;
+@@ -758,13 +763,13 @@ f_midi_bind(struct usb_configuration *c, struct usb_function *f)
+ 	status = usb_interface_id(c, f);
+ 	if (status < 0)
+ 		goto fail;
+-	ac_interface_desc.bInterfaceNumber = status;
++	midi_ac_interface_desc.bInterfaceNumber = status;
+ 
+ 	status = usb_interface_id(c, f);
+ 	if (status < 0)
+ 		goto fail;
+ 	ms_interface_desc.bInterfaceNumber = status;
+-	ac_header_desc.baInterfaceNr[0] = status;
++	midi_ac_header_desc.baInterfaceNr[0] = status;
+ 
+ 	status = -ENODEV;
+ 
+@@ -794,8 +799,8 @@ f_midi_bind(struct usb_configuration *c, struct usb_function *f)
+ 	 */
+ 
+ 	/* add the headers - these are always the same */
+-	midi_function[i++] = (struct usb_descriptor_header *) &ac_interface_desc;
+-	midi_function[i++] = (struct usb_descriptor_header *) &ac_header_desc;
++	midi_function[i++] = (struct usb_descriptor_header *) &midi_ac_interface_desc;
++	midi_function[i++] = (struct usb_descriptor_header *) &midi_ac_header_desc;
+ 	midi_function[i++] = (struct usb_descriptor_header *) &ms_interface_desc;
+ 
+ 	/* calculate the header's wTotalLength */
+@@ -918,16 +923,22 @@ f_midi_bind(struct usb_configuration *c, struct usb_function *f)
+  *
+  * Returns zero on success, else negative errno.
+  */
+-int __init f_midi_bind_config(struct usb_configuration *c,
++int /* __init */ f_midi_bind_config(struct usb_configuration *c,
+ 			      int index, char *id,
+ 			      unsigned int in_ports,
+ 			      unsigned int out_ports,
+ 			      unsigned int buflen,
+-			      unsigned int qlen)
++			      unsigned int qlen,
++			      struct midi_alsa_config* config)
+ {
+ 	struct f_midi *midi;
+ 	int status, i;
+ 
++	if (config) {
++		config->card = -1;
++		config->device = -1;
++	}
++
+ 	/* sanity check */
+ 	if (in_ports > MAX_PORTS || out_ports > MAX_PORTS)
+ 		return -EINVAL;
+@@ -956,6 +967,10 @@ int __init f_midi_bind_config(struct usb_configuration *c,
+ 	tasklet_init(&midi->tasklet, f_midi_in_tasklet, (unsigned long) midi);
+ 
+ 	/* set up ALSA midi devices */
++	midi->id = kstrdup(id, GFP_KERNEL);
++	midi->index = index;
++	midi->buflen = buflen;
++	midi->qlen = qlen;
+ 	midi->in_ports = in_ports;
+ 	midi->out_ports = out_ports;
+ 	status = f_midi_register_card(midi);
+@@ -969,15 +984,16 @@ int __init f_midi_bind_config(struct usb_configuration *c,
+ 	midi->func.set_alt     = f_midi_set_alt;
+ 	midi->func.disable     = f_midi_disable;
+ 
+-	midi->id = kstrdup(id, GFP_KERNEL);
+-	midi->index = index;
+-	midi->buflen = buflen;
+-	midi->qlen = qlen;
+-
+ 	status = usb_add_function(c, &midi->func);
+ 	if (status)
+ 		goto setup_fail;
+ 
++
++	if (config) {
++		config->card = midi->rmidi->card->number;
++		config->device = midi->rmidi->device;
++	}
++
+ 	return 0;
+ 
+ setup_fail:
+From 1e7ab38d6a5d49dab4b843ac4210b4ed69109e25 Mon Sep 17 00:00:00 2001
+From: Mike Lockwood <lockwood@google.com>
+Date: Thu, 29 Jan 2015 13:37:06 -0800
+Subject: [PATCH] USB: gadget: midi: Fix deadlock unbinding driver while it is
+ in use
+
+Using snd_card_free_when_closed rather than snd_card_free in f_midi_unbind
+makes it safe to disable the driver while a userspace client has the
+ALSA device open.
+
+Change-Id: Ibc40c01e7b1ce90fc61d3ea654b4816fadfc7ffd
+Signed-off-by: Mike Lockwood <lockwood@google.com>
+---
+ drivers/usb/gadget/f_midi.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/usb/gadget/f_midi.c b/drivers/usb/gadget/f_midi.c
+index 2f7e8f2..71821d1 100644
+--- a/drivers/usb/gadget/f_midi.c
++++ b/drivers/usb/gadget/f_midi.c
+@@ -410,7 +410,7 @@ static void f_midi_unbind(struct usb_configuration *c, struct usb_function *f)
+ 	card = midi->card;
+ 	midi->card = NULL;
+ 	if (card)
+-		snd_card_free(card);
++		snd_card_free_when_closed(card);
+ 
+ 	kfree(midi->id);
+ 	midi->id = NULL;

@@ -1,0 +1,132 @@
+allow mm-qcamerad media_rw_data_file:dir search;
+allow mm-qcamerad sysfs_camera:dir search;
+allow mm-qcamerad sysfs_camera:file rw_file_perms;
+allow mm-qcamerad system_data_file:dir w_dir_perms;
+allow mm-qcamerad system_file:file execmod; # for libmmcamera_faceproc
+type_transition mm-qcamerad system_data_file:sock_file camera_socket "cam_socket3";
+allow mm-qcamerad system_file:file execmod;From 47e912c87e91c5cd368e0ac5f0c74a0ac2b392b1 Mon Sep 17 00:00:00 2001
+From: Patrick Daly <pdaly@codeaurora.org>
+Date: Tue, 5 May 2015 14:09:01 -0700
+Subject: [PATCH] soc: qcom: scm-mpu: Add an API to unlock the kernel text
+ region
+
+The cpaccess driver writes to the kernel text section during normal
+operation. Add an API to disable any protection of this region by the
+scm-mpu driver.
+
+Protection is not reenabled after cpaccess operations since this is
+expected to be an uncommon usecase.
+
+Change-Id: I83caa906b94f4a522a203c1170f1d913681fc704
+Signed-off-by: Patrick Daly <pdaly@codeaurora.org>
+---
+ drivers/soc/qcom/scm-mpu.c | 27 +++++++++++++++++++++++----
+ include/soc/qcom/scm-mpu.h | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 53 insertions(+), 4 deletions(-)
+ create mode 100644 include/soc/qcom/scm-mpu.h
+
+diff --git a/drivers/soc/qcom/scm-mpu.c b/drivers/soc/qcom/scm-mpu.c
+index 1971a9a..2caa6e5 100644
+--- a/drivers/soc/qcom/scm-mpu.c
++++ b/drivers/soc/qcom/scm-mpu.c
+@@ -14,6 +14,7 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <soc/qcom/scm.h>
++#include <soc/qcom/scm-mpu.h>
+ #include <linux/mm.h>
+ 
+ #include <asm/sections.h>
+@@ -27,11 +28,12 @@
+ static ulong mpu_start;
+ static ulong mpu_size;
+ static u32 mpu_enable;
++/* Some drivers write to the kernel text area by design */
++static bool kernel_text_protected;
+ 
+ module_param(mpu_start, ulong, 0644);
+ module_param(mpu_size, ulong, 0644);
+ 
+-static void mem_prot_region(u64 start, u64 size, bool lock);
+ static int set_enabled(const char *val, const struct kernel_param *kp)
+ {
+ 	int ret = 0;
+@@ -50,7 +52,7 @@ static struct kernel_param_ops mpu_ops = {
+ };
+ module_param_cb(mpu_enable, &mpu_ops, &mpu_enable, 0644);
+ 
+-static void mem_prot_region(u64 start, u64 size, bool lock)
++int mem_prot_region(u64 start, u64 size, bool lock)
+ {
+ 	int ret;
+ 	struct scm_desc desc = {0};
+@@ -76,13 +78,30 @@ static void mem_prot_region(u64 start, u64 size, bool lock)
+ 	if (ret != 0)
+ 		pr_err("Failed to %s region %llx - %llx\n",
+ 			lock ? "protect" : "unlock", start, start + size);
++	return ret;
++}
++
++void scm_mpu_unlock_kernel_text(void)
++{
++	phys_addr_t phys = virt_to_phys(_stext);
++	if (!kernel_text_protected)
++		return;
++	kernel_text_protected = false;
++	mem_prot_region((u64)phys, (u64)(_etext - _stext), false);
++}
++
++void scm_mpu_lock_kernel_text(void)
++{
++	int ret;
++	phys_addr_t phys = virt_to_phys(_stext);
++	ret = mem_prot_region((u64)phys, (u64)(_etext - _stext), true);
++	kernel_text_protected = !ret;
+ }
+ 
+ #ifdef CONFIG_KERNEL_TEXT_MPU_PROT
+ static int __init mem_prot_init(void)
+ {
+-	phys_addr_t phys = virt_to_phys(_stext);
+-	mem_prot_region((u64)phys, (u64)(_etext - _stext), true);
++	scm_mpu_lock_kernel_text();
+ 	return 0;
+ }
+ late_initcall(mem_prot_init);
+diff --git a/include/soc/qcom/scm-mpu.h b/include/soc/qcom/scm-mpu.h
+new file mode 100644
+index 0000000..170bc12
+--- /dev/null
++++ b/include/soc/qcom/scm-mpu.h
+@@ -0,0 +1,30 @@
++/* Copyright (c) 2015, The Linux Foundation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++#ifndef __SCM_MPU_H
++#define __SCM_MPU_H
++
++#ifdef CONFIG_MSM_SCM
++void scm_mpu_unlock_kernel_text(void);
++void scm_mpu_lock_kernel_text(void);
++
++int mem_prot_region(u64 start, u64 size, bool lock);
++#else
++static inline void scm_mpu_unlock_kernel_text(void) {}
++static inline void scm_mpu_lock_kernel_text(void) {}
++
++int mem_prot_region(u64 start, u64 size, bool lock)
++{
++	return 0;
++}
++#endif
++
++#endif
+

@@ -1,0 +1,2406 @@
+diff -Nur -X dontdiff a/include/sound/apr_audio-v2.h b/include/sound/apr_audio-v2.h
+--- a/include/sound/apr_audio-v2.h	2016-01-24 04:27:36.766471000 -0500
++++ b/include/sound/apr_audio-v2.h	2016-03-24 06:18:48.000000000 -0400
+@@ -7018,6 +7018,9 @@
+ #define ASM_PARAM_ID_PP_SA_EP_PARAMS        0x10001fd1
+ #define ASM_PARAM_ID_PP_SA_EP_GET_PARAMS    0x10001fd2
+ 
++#define ASM_MODULE_ID_PP_SA_MSP             0x10001ff0
++#define ASM_MODULE_ID_PP_SA_MSP_PARAM       0x10001ff1
++
+ struct sa_params {
+ 	int16_t OutDevice;
+ 	int16_t Preset;
+@@ -7087,6 +7090,13 @@
+ 	int16_t lr;
+ } __packed;
+ 
++struct asm_stream_cmd_set_pp_params_msp {
++	struct apr_hdr	hdr;
++	struct asm_stream_cmd_set_pp_params_v2 param;
++	struct asm_stream_param_data_v2 data;
++	uint32_t msp_int;
++} __packed;
++
+ struct asm_stream_cmd_set_pp_params_sa_ep {
+ 	struct apr_hdr	hdr;
+ 	struct asm_stream_cmd_set_pp_params_v2 param;
+diff -Nur -X dontdiff a/include/sound/compress_offload.h b/include/sound/compress_offload.h
+--- a/include/sound/compress_offload.h	2016-01-24 04:27:36.768471000 -0500
++++ b/include/sound/compress_offload.h	2016-03-24 06:18:48.000000000 -0400
+@@ -192,6 +192,8 @@
+ #define SNDRV_COMPRESS_DRAIN		_IO('C', 0x34)
+ #define SNDRV_COMPRESS_NEXT_TRACK	_IO('C', 0x35)
+ #define SNDRV_COMPRESS_PARTIAL_DRAIN	_IO('C', 0x36)
++#define SNDRV_COMPRESS_SET_NEXT_TRACK_PARAM\
++                                        _IOW('C', 0x37, union snd_codec_options)
+ /*
+  * TODO
+  * 1. add mmap support
+diff -Nur -X dontdiff a/include/sound/max98506.h b/include/sound/max98506.h
+--- a/include/sound/max98506.h	2016-01-24 04:27:36.768471000 -0500
++++ b/include/sound/max98506.h	2016-03-24 06:18:48.000000000 -0400
+@@ -35,6 +35,16 @@
+ #define MAX98506_VSTEP_15		15
+ #define MAX98506_VSTEP_MAX		MAX98506_VSTEP_15
+ 
++/* MAX98506 one stop mode */
++enum one_stop_mode {
++	MAX98506_OSM_STEREO = 0,
++	MAX98506_OSM_MONO_L,
++	MAX98506_OSM_MONO_R,
++	MAX98506_OSM_RCV_L,
++	MAX98506_OSM_RCV_R,
++	MAX98506_OSM_MAX,
++};
++
+ #ifdef CONFIG_SND_SOC_MAXIM_DSM_CAL
+ extern struct class *g_class;
+ #else
+@@ -67,6 +77,10 @@
+ 	uint32_t pinfo[MAX98506_PINFO_SZ];
+ 	const uint32_t *reg_arr;
+ 	uint32_t reg_arr_len;
++	int sub_reg;
++	int interleave;
++	int osm;
++	uint32_t boostv;
+ };
+ 
+ #endif /* __SOUND_MAX98506_PDATA_H__ */
+diff -Nur -X dontdiff a/include/sound/maxim_dsm.h b/include/sound/maxim_dsm.h
+--- a/include/sound/maxim_dsm.h	2016-01-24 04:27:36.769471000 -0500
++++ b/include/sound/maxim_dsm.h	2016-03-24 06:18:48.000000000 -0400
+@@ -26,6 +26,10 @@
+ #define FLAG_WRITE_RDC_CAL_ONLY 0xca00ca00
+ #define FLAG_WRITE_FEATURE_ONLY 0xfea0fea0
+ 
++#define RESERVED_ADDR_COUNT		0xFF
++#define START_ADDR_FOR_LSI		0x2A004C
++#define END_ADDR_FOR_LSI		(0x2A027A + RESERVED_ADDR_COUNT)
++
+ enum maxdsm_version {
+ 	VERSION_3_0 = 30,
+ 	VERSION_3_5_A = 35,
+@@ -405,6 +409,7 @@
+ 	uint32_t registered;
+ 	uint32_t update_cal;
+ 	uint32_t ignore_mask;
++	uint32_t spk_state;
+ };
+ 
+ #ifdef CONFIG_SND_SOC_MAXIM_DSM
+@@ -430,6 +435,10 @@
+ 
+ int maxdsm_update_feature_en_adc(int apply);
+ 
++int maxdsm_get_spk_state(void);
++void maxdsm_set_spk_state(int state);
++int maxdsm_set_pilot_signal_state(int on);
++
+ #ifdef USE_DSM_LOG
+ #define LOG_BUFFER_ARRAY_SIZE 10
+ 
+diff -Nur -X dontdiff a/include/sound/q6asm-v2.h b/include/sound/q6asm-v2.h
+--- a/include/sound/q6asm-v2.h	2016-01-24 04:27:36.769471000 -0500
++++ b/include/sound/q6asm-v2.h	2016-03-24 06:18:48.000000000 -0400
+@@ -410,6 +410,8 @@
+ int q6asm_set_sa_ep(struct audio_client *ac,int *param);
+ int q6asm_get_sa_ep(struct audio_client *ac);
+ 
++int q6asm_set_msp(struct audio_client *ac, long *param);
++
+ /* Send the stream meta data to remove initial and trailing silence */
+ int q6asm_stream_send_meta_data(struct audio_client *ac, uint32_t stream_id,
+ 		uint32_t initial_samples, uint32_t trailing_samples);
+diff -Nur -X dontdiff a/sound/soc/codecs/max98506.c b/sound/soc/codecs/max98506.c
+--- a/sound/soc/codecs/max98506.c	2016-01-24 04:27:36.777472000 -0500
++++ b/sound/soc/codecs/max98506.c	2016-03-24 06:18:57.000000000 -0400
+@@ -29,6 +29,41 @@
+ #define msg_maxim(format, args...)
+ #endif /* DEBUG_MAX98506 */
+ 
++static int max98506_init_status;
++int max98506_get_init_status(void)
++{
++	return max98506_init_status;
++}
++EXPORT_SYMBOL_GPL(max98506_get_init_status);
++
++static int max98506_regmap_write(struct max98506_priv *max98506,
++	unsigned int reg,
++			       unsigned int val)
++{
++	int ret = 0;
++
++	ret = regmap_write(max98506->regmap, reg, val);
++
++	if (max98506->sub_regmap)
++		ret = regmap_write(max98506->sub_regmap, reg, val);
++
++	return ret;
++}
++
++static int max98506_regmap_update_bits(struct max98506_priv *max98506,
++	unsigned int reg,
++		       unsigned int mask, unsigned int val)
++{
++	int ret = 0;
++
++	ret = regmap_update_bits(max98506->regmap, reg, mask, val);
++
++	if (max98506->sub_regmap)
++		ret = regmap_update_bits(max98506->sub_regmap, reg, mask, val);
++
++	return ret;
++}
++
+ static struct reg_default max98506_reg[] = {
+ 	{ 0x02, 0x00 }, /* Live Status0 */
+ 	{ 0x03, 0x00 }, /* Live Status1 */
+@@ -73,7 +108,7 @@
+ 	{ 0x37, 0x00 }, /* Configuration */
+ 	{ 0x38, 0x00 }, /* Global Enable */
+ 	{ 0x3A, 0x00 }, /* Boost Limiter */
+-	{ 0xFF, 0x50 }, /* Revision ID */
++	{ 0xFF, 0x00 }, /* Revision ID */
+ };
+ 
+ static bool max98506_volatile_register(struct device *dev, unsigned int reg)
+@@ -217,7 +252,7 @@
+ 	struct max98506_pdata *pdata = max98506->pdata;
+ 	unsigned int sel = ucontrol->value.integer.value[0];
+ 
+-	regmap_update_bits(max98506->regmap, MAX98506_R02D_GAIN,
++	max98506_regmap_update_bits(max98506, MAX98506_R02D_GAIN,
+ 			MAX98506_SPK_GAIN_MASK, sel << MAX98506_SPK_GAIN_SHIFT);
+ 
+ 	pdata->spk_gain = sel;
+@@ -249,7 +284,7 @@
+ 	struct max98506_priv *max98506 = snd_soc_codec_get_drvdata(codec);
+ 	unsigned int sel = ucontrol->value.integer.value[0];
+ 
+-	regmap_update_bits(max98506->regmap, reg, mask, sel << shift);
++	max98506_regmap_update_bits(max98506, reg, mask, sel << shift);
+ 
+ 	return 0;
+ }
+@@ -325,37 +360,108 @@
+ 	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(spk_state_text), spk_state_text),
+ };
+ 
+-static void max98506_spk_enable(struct max98506_priv *max98506,
+-		int enable)
++static const char * const max98506_one_stop_mode_text[] = {
++	"Stereo",
++	"Mono Left", "Mono Right",
++	"Receiver Left", "Receiver Right"
++};
++
++static const struct soc_enum max98506_one_stop_mode_enum =
++	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(max98506_one_stop_mode_text),
++			max98506_one_stop_mode_text);
++
++static int __max98506_spk_enable(struct max98506_priv *max98506)
+ {
+ 	struct max98506_pdata *pdata = max98506->pdata;
++	unsigned int gain_l, gain_r;
++	unsigned int enable_l, enable_r;
++	unsigned int vimon = MAX98506_ADC_VIMON_EN_MASK;
++	unsigned int boostv = pdata->boostv;
++
++	gain_l = gain_r = pdata->spk_gain;
++	enable_l = enable_r = 0x00;
++
++	switch (pdata->osm) {
++	case MAX98506_OSM_STEREO:
++		enable_l = enable_r = MAX98506_EN_MASK;
++		break;
++	case MAX98506_OSM_RCV_L:
++		gain_l = 0x07; /* 0 db */
++		vimon = 0; /* turn off VIMON */
++		boostv = 0x0F; /* 6.5V */
++	case MAX98506_OSM_MONO_L:
++		enable_l = MAX98506_EN_MASK;
++		break;
++	case MAX98506_OSM_RCV_R:
++		gain_r = 0x07; /* 0 db */
++		vimon = 0; /* turn off VIMON */
++		boostv = 0x0F; /* 6.5V */
++	case MAX98506_OSM_MONO_R:
++		enable_r = MAX98506_EN_MASK;
++		break;
++	default:
++		msg_maxim("Invalid one_stop_mode");
++		return -EINVAL;
++	}
+ 
+-	if (enable) {
+-		regmap_update_bits(max98506->regmap,
++	regmap_update_bits(max98506->regmap,
++			MAX98506_R02D_GAIN,
++			MAX98506_SPK_GAIN_MASK,
++			gain_l);
++	if (max98506->sub_regmap)
++		regmap_update_bits(max98506->sub_regmap,
+ 				MAX98506_R02D_GAIN,
+ 				MAX98506_SPK_GAIN_MASK,
+-				pdata->spk_gain);
++				gain_r);
+ 
+-		regmap_update_bits(max98506->regmap,
+-				MAX98506_R036_BLOCK_ENABLE,
+-				MAX98506_BST_EN_MASK |
+-				MAX98506_SPK_EN_MASK,
+-				MAX98506_BST_EN_MASK |
+-				MAX98506_SPK_EN_MASK);
+-		regmap_write(max98506->regmap,
++	max98506_regmap_update_bits(max98506,
++			MAX98506_R036_BLOCK_ENABLE,
++			MAX98506_BST_EN_MASK |
++			MAX98506_SPK_EN_MASK,
++			MAX98506_BST_EN_MASK |
++			MAX98506_SPK_EN_MASK);
++
++	regmap_write(max98506->regmap,
++			MAX98506_R038_GLOBAL_ENABLE,
++			enable_l);
++	if (max98506->sub_regmap)
++		regmap_write(max98506->sub_regmap,
+ 				MAX98506_R038_GLOBAL_ENABLE,
+-				MAX98506_EN_MASK);
+-	} else {
+-		regmap_update_bits(max98506->regmap,
++				enable_r);
++
++	max98506_regmap_update_bits(max98506,
++			MAX98506_R036_BLOCK_ENABLE,
++			MAX98506_ADC_VIMON_EN_MASK,
++			vimon);
++
++	max98506_regmap_update_bits(max98506,
++			MAX98506_R037_CONFIGURATION,
++			MAX98506_BST_VOUT_MASK,
++			boostv << MAX98506_BST_VOUT_SHIFT);
++
++	return 0;
++}
++
++static void max98506_spk_enable(struct max98506_priv *max98506,
++		int enable)
++{
++	if (enable)
++		__max98506_spk_enable(max98506);
++	else {
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R02D_GAIN,
+ 				MAX98506_SPK_GAIN_MASK,
+ 				0x00);
+ 		usleep_range(4999, 5000);
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R038_GLOBAL_ENABLE,
+ 				MAX98506_EN_MASK,
+ 				0x00);
+ 	}
++
++#ifdef CONFIG_SND_SOC_MAXIM_DSM
++	maxdsm_set_spk_state(enable);
++#endif /* CONFIG_SND_SOC_MAXIM_DSM */
+ }
+ 
+ static int max98506_spk_out_get(struct snd_kcontrol *kcontrol,
+@@ -413,12 +519,12 @@
+ 	int sel = (int)ucontrol->value.integer.value[0];
+ 
+ 	if (sel)
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R036_BLOCK_ENABLE,
+ 				MAX98506_ADC_VIMON_EN_MASK,
+ 				MAX98506_ADC_VIMON_EN_MASK);
+ 	else
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R036_BLOCK_ENABLE,
+ 				MAX98506_ADC_VIMON_EN_MASK,
+ 				0);
+@@ -491,14 +597,14 @@
+ 	 */
+ 	if (sel <= vstep->adc_thres
+ 			&& vstep->adc_status) {
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R036_BLOCK_ENABLE,
+ 				MAX98506_ADC_VIMON_EN_MASK,
+ 				0);
+ 		adc_status = !vstep->adc_status;
+ 	} else if (sel > vstep->adc_thres
+ 			&& !vstep->adc_status) {
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R036_BLOCK_ENABLE,
+ 				MAX98506_ADC_VIMON_EN_MASK,
+ 				MAX98506_ADC_VIMON_EN_MASK);
+@@ -522,8 +628,9 @@
+ 	 * Over step 15		: 8.5V
+ 	 */
+ 	mask |= vstep->boost_step[sel];
++	max98506->pdata->boostv = mask;
+ 	mask <<= MAX98506_BST_VOUT_SHIFT;
+-	regmap_update_bits(max98506->regmap,
++	max98506_regmap_update_bits(max98506,
+ 			MAX98506_R037_CONFIGURATION,
+ 			MAX98506_BST_VOUT_MASK,
+ 			mask);
+@@ -534,6 +641,35 @@
+ 	return 0;
+ }
+ 
++static int max98506_one_stop_mode_get(struct snd_kcontrol *kcontrol,
++		struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
++	struct max98506_priv *max98506 = snd_soc_codec_get_drvdata(codec);
++	struct max98506_pdata *pdata = max98506->pdata;
++
++	ucontrol->value.integer.value[0] = pdata->osm;
++
++	return 0;
++}
++
++static int max98506_one_stop_mode_put(struct snd_kcontrol *kcontrol,
++		struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
++	struct max98506_priv *max98506 = snd_soc_codec_get_drvdata(codec);
++	struct max98506_pdata *pdata = max98506->pdata;
++	int osm = (int)ucontrol->value.integer.value[0];
++
++	osm = osm < 0 ? 0 : osm;
++	if (osm < MAX98506_OSM_MAX) {
++		pdata->osm = osm;
++		__max98506_spk_enable(max98506);
++	}
++
++	return osm >= MAX98506_OSM_MAX ? -EINVAL : 0;
++}
++
+ static const struct snd_kcontrol_new max98506_snd_controls[] = {
+ 	SOC_SINGLE_EXT_TLV("Speaker Gain", MAX98506_R02D_GAIN,
+ 		MAX98506_SPK_GAIN_SHIFT,
+@@ -569,6 +705,9 @@
+ 	SOC_SINGLE_EXT("Volume Step", SND_SOC_NOPM, 0, 15, 0,
+ 			max98506_volume_step_get, max98506_volume_step_put),
+ 
++	SOC_ENUM_EXT("One Stop Mode", max98506_one_stop_mode_enum,
++			max98506_one_stop_mode_get, max98506_one_stop_mode_put),
++
+ #ifdef USE_DSM_LOG
+ 	SOC_SINGLE_EXT("DSM LOG", SND_SOC_NOPM, 0, 3, 0,
+ 		max98506_get_dump_status, max98506_set_dump_status),
+@@ -632,61 +771,82 @@
+ 	/*
+ 	 * 1. use BCLK instead of MCLK
+ 	 */
+-	regmap_update_bits(max98506->regmap,
++	max98506_regmap_update_bits(max98506,
+ 			MAX98506_R01A_DAI_CLK_MODE1,
+ 			MAX98506_DAI_CLK_SOURCE_MASK,
+ 			MAX98506_DAI_CLK_SOURCE_MASK);
++
+ 	/*
+ 	 * 2. set DAI to slave mode
+ 	 */
+-	regmap_update_bits(max98506->regmap,
++	max98506_regmap_update_bits(max98506,
+ 			MAX98506_R01B_DAI_CLK_MODE2,
+ 			MAX98506_DAI_MAS_MASK,
+ 			0);
+ 	/*
+ 	 * 3. set BLCKs to LRCLKs to 64
+ 	 */
+-	regmap_update_bits(max98506->regmap,
+-			MAX98506_R01B_DAI_CLK_MODE2,
+-			MAX98506_DAI_BSEL_MASK,
+-			MAX98506_DAI_BSEL_32);
++	if (max98506->sub_regmap && !pdata->interleave)
++		max98506_regmap_update_bits(max98506,
++				MAX98506_R01B_DAI_CLK_MODE2,
++				MAX98506_DAI_BSEL_MASK,
++				MAX98506_DAI_BSEL_64);
++	else
++		max98506_regmap_update_bits(max98506,
++				MAX98506_R01B_DAI_CLK_MODE2,
++				MAX98506_DAI_BSEL_MASK,
++				MAX98506_DAI_BSEL_32);
++
+ 	/*
+ 	 * 4. set VMON and IMON slots
+ 	 */
++	max98506_regmap_update_bits(max98506,
++			MAX98506_R022_DOUT_CFG_VMON,
++			MAX98506_DAI_VMON_EN_MASK,
++			MAX98506_DAI_VMON_EN_MASK);
++	max98506_regmap_update_bits(max98506,
++			MAX98506_R023_DOUT_CFG_IMON,
++			MAX98506_DAI_IMON_EN_MASK,
++			MAX98506_DAI_IMON_EN_MASK);
++
+ 	if (!pdata->vmon_slot)	{
+-		regmap_update_bits(max98506->regmap,
+-				MAX98506_R022_DOUT_CFG_VMON,
+-				MAX98506_DAI_VMON_EN_MASK,
+-				MAX98506_DAI_VMON_EN_MASK);
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R022_DOUT_CFG_VMON,
+ 				MAX98506_DAI_VMON_SLOT_MASK,
+ 				MAX98506_DAI_VMON_SLOT_02_03);
+-		regmap_update_bits(max98506->regmap,
+-				MAX98506_R023_DOUT_CFG_IMON,
+-				MAX98506_DAI_IMON_EN_MASK,
+-				MAX98506_DAI_IMON_EN_MASK);
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R023_DOUT_CFG_IMON,
+ 				MAX98506_DAI_IMON_SLOT_MASK,
+ 				MAX98506_DAI_IMON_SLOT_00_01);
++		if (max98506->sub_regmap && pdata->interleave)	{
++			regmap_update_bits(max98506->regmap,
++					MAX98506_R024_DAI_INT_CFG,
++					MAX98506_DAI_VBAT_SLOT_MASK,
++					0x0);
++			regmap_update_bits(max98506->sub_regmap,
++					MAX98506_R024_DAI_INT_CFG,
++					MAX98506_DAI_VBAT_SLOT_MASK,
++					0x2);
++		}
+ 	} else {
+-		regmap_update_bits(max98506->regmap,
+-				MAX98506_R022_DOUT_CFG_VMON,
+-				MAX98506_DAI_VMON_EN_MASK,
+-				MAX98506_DAI_VMON_EN_MASK);
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R022_DOUT_CFG_VMON,
+ 				MAX98506_DAI_VMON_SLOT_MASK,
+ 				MAX98506_DAI_VMON_SLOT_00_01);
+-		regmap_update_bits(max98506->regmap,
+-				MAX98506_R023_DOUT_CFG_IMON,
+-				MAX98506_DAI_IMON_EN_MASK,
+-				MAX98506_DAI_IMON_EN_MASK);
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R023_DOUT_CFG_IMON,
+ 				MAX98506_DAI_IMON_SLOT_MASK,
+ 				MAX98506_DAI_IMON_SLOT_02_03);
++		if (max98506->sub_regmap && pdata->interleave)	{
++			regmap_update_bits(max98506->regmap,
++					MAX98506_R024_DAI_INT_CFG,
++					MAX98506_DAI_VBAT_SLOT_MASK,
++					0x2);
++			regmap_update_bits(max98506->sub_regmap,
++					MAX98506_R024_DAI_INT_CFG,
++					MAX98506_DAI_VBAT_SLOT_MASK,
++					0x0);
++		}
+ 	}
+ }
+ 
+@@ -697,12 +857,12 @@
+ 	/*
+ 	 * 1. use MCLK for Left channel, right channel always BCLK
+ 	 */
+-	regmap_update_bits(max98506->regmap, MAX98506_R01A_DAI_CLK_MODE1,
++	max98506_regmap_update_bits(max98506, MAX98506_R01A_DAI_CLK_MODE1,
+ 			MAX98506_DAI_CLK_SOURCE_MASK, 0);
+ 	/*
+ 	 * 2. set left channel DAI to master mode, right channel always slave
+ 	 */
+-	regmap_update_bits(max98506->regmap, MAX98506_R01B_DAI_CLK_MODE2,
++	max98506_regmap_update_bits(max98506, MAX98506_R01B_DAI_CLK_MODE2,
+ 			MAX98506_DAI_MAS_MASK, MAX98506_DAI_MAS_MASK);
+ }
+ 
+@@ -759,7 +919,7 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	regmap_update_bits(max98506->regmap, MAX98506_R020_FORMAT,
++	max98506_regmap_update_bits(max98506, MAX98506_R020_FORMAT,
+ 			MAX98506_DAI_BCI_MASK | MAX98506_DAI_WCI_MASK, invert);
+ 
+ 	return 0;
+@@ -809,12 +969,12 @@
+ 	/*
+ 	 * 1. set DAI_SR to correct LRCLK frequency
+ 	 */
+-	regmap_update_bits(max98506->regmap, MAX98506_R01B_DAI_CLK_MODE2,
++	max98506_regmap_update_bits(max98506, MAX98506_R01B_DAI_CLK_MODE2,
+ 			MAX98506_DAI_SR_MASK, dai_sr << MAX98506_DAI_SR_SHIFT);
+ 	/*
+ 	 * 2. set MDLL
+ 	 */
+-	regmap_update_bits(max98506->regmap,
++	max98506_regmap_update_bits(max98506,
+ 			MAX98506_R01A_DAI_CLK_MODE1,
+ 			MAX98506_MDLL_MULT_MASK,
+ 			mdll << MAX98506_MDLL_MULT_SHIFT);
+@@ -837,22 +997,21 @@
+ 	switch (params_format(params)) {
+ 	case SNDRV_PCM_FORMAT_S16_LE:
+ 		msg_maxim("set SNDRV_PCM_FORMAT_S16_LE");
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R020_FORMAT,
+ 				MAX98506_DAI_CHANSZ_MASK,
+ 				MAX98506_DAI_CHANSZ_16);
+ 		break;
+ 	case SNDRV_PCM_FORMAT_S24_LE:
+ 		msg_maxim("set SNDRV_PCM_FORMAT_S24_LE");
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R020_FORMAT,
+ 				MAX98506_DAI_CHANSZ_MASK,
+-				MAX98506_DAI_CHANSZ_32);
+-		msg_maxim("(really set to 32 bits)");
++				MAX98506_DAI_CHANSZ_24);
+ 		break;
+ 	case SNDRV_PCM_FORMAT_S32_LE:
+ 		msg_maxim("set SNDRV_PCM_FORMAT_S32_LE");
+-		regmap_update_bits(max98506->regmap,
++		max98506_regmap_update_bits(max98506,
+ 				MAX98506_R020_FORMAT,
+ 				MAX98506_DAI_CHANSZ_MASK,
+ 				MAX98506_DAI_CHANSZ_32);
+@@ -879,6 +1038,40 @@
+ 	return 0;
+ }
+ 
++static int max98506_dai_digital_mute(struct snd_soc_dai *codec_dai, int mute)
++{
++	struct max98506_priv *max98506
++		= snd_soc_codec_get_drvdata(codec_dai->codec);
++	bool action = 1;
++
++	if (max98506->pca.capture_active != codec_dai->capture_active) {
++		max98506->pca.capture_active = codec_dai->capture_active;
++		action = 0;
++	}
++
++	if (max98506->pca.playback_active != codec_dai->playback_active) {
++		max98506->pca.playback_active = codec_dai->playback_active;
++		action = 1;
++	}
++
++	if ((mute && codec_dai->playback_active) && action)
++		action = 0;
++
++	msg_maxim("mute=%d playback_active=%d capture_active=%d action=%d",
++			mute, max98506->pca.playback_active,
++			max98506->pca.capture_active, action);
++
++	if (action)
++		max98506_spk_enable(max98506, mute != 0 ? 0 : 1);
++
++#ifdef USE_REG_DUMP
++	if (action)
++		reg_dump(max98506);
++#endif /* USE_REG_DUMP */
++
++	return 0;
++}
++
+ #define MAX98506_RATES SNDRV_PCM_RATE_8000_48000
+ #define MAX98506_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | \
+ 			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
+@@ -887,6 +1080,7 @@
+ 	.set_fmt = max98506_dai_set_fmt,
+ 	.set_tdm_slot = max98506_set_tdm_slot,
+ 	.hw_params = max98506_dai_hw_params,
++	.digital_mute = max98506_dai_digital_mute,
+ };
+ 
+ static struct snd_soc_dai_driver max98506_dai[] = {
+@@ -929,7 +1123,7 @@
+ 			msg_maxim("[0x%02x, 0x%02x]",
+ 					be32_to_cpu(reg_chg->reg),
+ 					be32_to_cpu(reg_chg->def));
+-			regmap_write(max98506->regmap,
++			max98506_regmap_write(max98506,
+ 					be32_to_cpu(reg_chg->reg),
+ 					be32_to_cpu(reg_chg->def));
+ 		}
+@@ -1112,8 +1306,10 @@
+ 	return ret;
+ }
+ 
+-static int max98506_check_version(struct max98506_priv *max98506)
++static int max98506_check_revID(struct regmap *regmap)
+ {
++	int ret = 0;
++	int loop;
+ 	uint32_t reg = 0x00;
+ 	uint32_t version_table[] = {
+ 		MAX98506_VERSION,
+@@ -1123,21 +1319,35 @@
+ 		MAX98506_VERSION4,
+ 		MAX98506_VERSION5,
+ 	};
+-	int loop;
+-
+-	regmap_read(max98506->regmap, MAX98506_R0FF_VERSION, &reg);
+ 
++	regmap_read(regmap, MAX98506_R0FF_VERSION, &reg);
+ 	for (loop = 0; loop < ARRAY_SIZE(version_table); loop++) {
+ 		if (reg == version_table[loop])
+-			return reg;
++			ret = reg;
+ 	}
++	return ret;
++}
++static int max98506_check_version(struct max98506_priv *max98506)
++{
++	int ret = 0;
++	int rev_id = 0;
+ 
+-	return 0;
++	rev_id = max98506_check_revID(max98506->regmap);
++	pr_err("%s REV ID:0x%x\n", __func__, rev_id);
++
++	if (max98506->sub_regmap)	{
++		ret = max98506_check_revID(max98506->sub_regmap);
++		ret = rev_id << 8 || ret;
++	} else
++		ret = rev_id;
++
++	return ret;
+ }
+ 
+ static int max98506_probe(struct snd_soc_codec *codec)
+ {
+ 	struct max98506_priv *max98506 = snd_soc_codec_get_drvdata(codec);
++	struct max98506_pdata *pdata = max98506->pdata;
+ 	struct max98506_volume_step_info *vstep = &max98506->vstep;
+ 	int ret = 0;
+ 	int reg = 0;
+@@ -1162,29 +1372,54 @@
+ 	}
+ 	msg_maxim("device version 0x%02x", reg);
+ 
+-	regmap_write(max98506->regmap, MAX98506_R038_GLOBAL_ENABLE, 0x80);
+-
+-	/* It's not the default but we need to set DAI_DLY */
+-	regmap_write(max98506->regmap, MAX98506_R020_FORMAT,
++	max98506_regmap_write(max98506, MAX98506_R038_GLOBAL_ENABLE, 0x00);
++	max98506_regmap_write(max98506, MAX98506_R020_FORMAT,
+ 		MAX98506_DAI_DLY_MASK);
++	max98506_regmap_write(max98506, MAX98506_R021_TDM_SLOT_SELECT, 0xC8);
++	max98506_regmap_write(max98506, MAX98506_R027_DOUT_HIZ_CFG1, 0xFF);
++	max98506_regmap_write(max98506, MAX98506_R028_DOUT_HIZ_CFG2, 0xFF);
++	max98506_regmap_write(max98506, MAX98506_R029_DOUT_HIZ_CFG3, 0xFF);
++	max98506_regmap_write(max98506, MAX98506_R02C_FILTERS, 0xD9);
+ 
+-	regmap_write(max98506->regmap, MAX98506_R021_TDM_SLOT_SELECT, 0xC8);
++	if (max98506->sub_regmap)		{
++		if (pdata->interleave) {
++			regmap_write(max98506->regmap,
++				MAX98506_R02A_DOUT_HIZ_CFG4, 0xFC);
++			regmap_write(max98506->sub_regmap,
++				MAX98506_R02A_DOUT_HIZ_CFG4, 0xF3);
++		} else {
++			regmap_write(max98506->regmap,
++				MAX98506_R02A_DOUT_HIZ_CFG4, 0xF0);
++			regmap_write(max98506->sub_regmap,
++				MAX98506_R02A_DOUT_HIZ_CFG4, 0x0F);
++		}
++		regmap_update_bits(max98506->regmap,
++			MAX98506_R02D_GAIN, MAX98506_DAC_IN_SEL_MASK,
++			MAX98506_DAC_IN_SEL_LEFT_DAI);	/* LEFT */
+ 
+-	regmap_write(max98506->regmap, MAX98506_R027_DOUT_HIZ_CFG1, 0xFF);
+-	regmap_write(max98506->regmap, MAX98506_R028_DOUT_HIZ_CFG2, 0xFF);
+-	regmap_write(max98506->regmap, MAX98506_R029_DOUT_HIZ_CFG3, 0xFF);
+-	regmap_write(max98506->regmap, MAX98506_R02A_DOUT_HIZ_CFG4, 0xF0);
+-	regmap_write(max98506->regmap, MAX98506_R02C_FILTERS, 0xD9);
++		regmap_update_bits(max98506->sub_regmap,
++			MAX98506_R02D_GAIN, MAX98506_DAC_IN_SEL_MASK,
++			MAX98506_DAC_IN_SEL_RIGHT_DAI);	/* RIGHT */
++		max98506_regmap_write(max98506, MAX98506_R02F_SPK_AMP, 0x00);
++	} else {
++		max98506_regmap_write(max98506,
++			MAX98506_R02A_DOUT_HIZ_CFG4, 0xF0);
++		max98506_regmap_update_bits(max98506,
++			MAX98506_R02D_GAIN, MAX98506_DAC_IN_SEL_MASK,
++			MAX98506_DAC_IN_SEL_DIV2_SUMMED_DAI);
++		max98506_regmap_write(max98506, MAX98506_R02F_SPK_AMP, 0x02);
++	}
+ 
+-	regmap_update_bits(max98506->regmap,
+-		MAX98506_R02D_GAIN, MAX98506_DAC_IN_SEL_MASK,
+-		MAX98506_DAC_IN_SEL_DIV2_SUMMED_DAI);
++	/* Enable ZCD */
++	max98506_regmap_update_bits(max98506,
++			MAX98506_R02E_GAIN_RAMPING,
++			MAX98506_SPK_ZCD_EN_MASK,
++			MAX98506_SPK_ZCD_EN_MASK);
+ 
+-	regmap_write(max98506->regmap, MAX98506_R02F_SPK_AMP, 0x02);
+-	regmap_write(max98506->regmap, MAX98506_R034_ALC_CONFIGURATION, 0x12);
++	max98506_regmap_write(max98506, MAX98506_R034_ALC_CONFIGURATION, 0x12);
+ 
+ 	/* Enable ADC and Speaker */
+-	regmap_update_bits(max98506->regmap,
++	max98506_regmap_update_bits(max98506,
+ 			MAX98506_R036_BLOCK_ENABLE,
+ 			MAX98506_ADC_VIMON_EN_MASK |
+ 			MAX98506_SPK_EN_MASK,
+@@ -1193,14 +1428,21 @@
+ 	vstep->adc_status = 1;
+ 
+ 	/* Set boost output to maximum */
+-	regmap_write(max98506->regmap, MAX98506_R037_CONFIGURATION, 0x00);
++	max98506_regmap_write(max98506, MAX98506_R037_CONFIGURATION, 0x00);
++	pdata->boostv = 0x00; /* 8.5V(default) */
+ 
+ 	/* Disable ALC muting */
+-	regmap_write(max98506->regmap, MAX98506_R03A_BOOST_LIMITER, 0xF8);
++	max98506_regmap_write(max98506, MAX98506_R03A_BOOST_LIMITER, 0xF8);
+ 
+ 	max98506_set_slave(max98506);
+ 	max98506_handle_pdata(codec);
+ 
++	if (pdata->interleave)
++		max98506_regmap_update_bits(max98506,
++			MAX98506_R020_FORMAT,
++			MAX98506_DAI_INTERLEAVE_MASK,
++			MAX98506_DAI_INTERLEAVE_MASK);
++
+ #if defined(USE_DSM_LOG) || defined(USE_DSM_UPDATE_CAL)
+ 	if (!g_class)
+ 		g_class = class_create(THIS_MODULE, class_name_log);
+@@ -1260,12 +1502,44 @@
+ 	.cache_type       = REGCACHE_RBTREE,
+ };
+ 
++static struct i2c_board_info max98506_i2c_sub_board[] = {
++	{
++		I2C_BOARD_INFO("max98506_sub", 0x34),
++	}
++};
++
++static struct i2c_driver max98506_i2c_sub_driver = {
++	.driver = {
++		.name = "max98506_sub",
++		.owner = THIS_MODULE,
++	},
++};
++
++struct i2c_client *max98506_add_sub_device(int bus_id, int slave_addr)
++{
++	struct i2c_client *i2c = NULL;
++	struct i2c_adapter *adapter;
++
++	msg_maxim("bus_id:%d, slave_addr:0x%x", bus_id, slave_addr);
++	max98506_i2c_sub_board[0].addr = slave_addr;
++
++	adapter = i2c_get_adapter(bus_id);
++	if (adapter) {
++		i2c = i2c_new_device(adapter, max98506_i2c_sub_board);
++		if (i2c)
++			i2c->dev.driver = &max98506_i2c_sub_driver.driver;
++	}
++
++	return i2c;
++}
++
+ static int max98506_i2c_probe(struct i2c_client *i2c,
+ 			     const struct i2c_device_id *id)
+ {
+ 	struct max98506_priv *max98506;
+ 	struct max98506_pdata *pdata;
+ 	struct max98506_volume_step_info *vstep;
++
+ 	int ret;
+ 	int pinfo_status = 0;
+ 
+@@ -1294,7 +1568,7 @@
+ 		ret = of_property_read_u32(i2c->dev.of_node,
+ 				"maxim,sysclk", &pdata->sysclk);
+ 		if (ret) {
+-			dev_err(&i2c->dev, "There is no sysclk property.");
++			dev_err(&i2c->dev, "There is no sysclk property.\n");
+ 			pdata->sysclk = 12288000;
+ 		}
+ 
+@@ -1302,7 +1576,7 @@
+ 		ret = of_property_read_u32(i2c->dev.of_node,
+ 				"maxim,spk-gain", &pdata->spk_gain);
+ 		if (ret) {
+-			dev_err(&i2c->dev, "There is no spk_gain property.");
++			dev_err(&i2c->dev, "There is no spk_gain property.\n");
+ 			pdata->spk_gain = 0x14;
+ 		}
+ 
+@@ -1310,7 +1584,7 @@
+ 		ret = of_property_read_u32(i2c->dev.of_node,
+ 				"maxim,vmon_slot", &pdata->vmon_slot);
+ 		if (ret) {
+-			dev_err(&i2c->dev, "There is no vmon_slot property.");
++			dev_err(&i2c->dev, "There is no vmon_slot property.\n");
+ 			pdata->vmon_slot = 0;
+ 		}
+ 
+@@ -1349,14 +1623,14 @@
+ 		ret = of_property_read_u32(i2c->dev.of_node,
+ 				"maxim,adc_threshold", &vstep->adc_thres);
+ 		if (ret) {
+-			dev_err(&i2c->dev, "There is no adc_threshold property.");
++			dev_err(&i2c->dev, "There is no adc_threshold property.\n");
+ 			vstep->adc_thres = MAX98506_VSTEP_7;
+ 		}
+ 
+ 		pdata->reg_arr = of_get_property(i2c->dev.of_node,
+ 				"maxim,registers-of-amp", &pdata->reg_arr_len);
+ 		if (pdata->reg_arr == NULL)
+-			dev_err(&i2c->dev, "There is no registers-diff property.");
++			dev_err(&i2c->dev, "There is no registers-diff property.\n");
+ 
+ #ifdef USE_DSM_LOG
+ 		ret = of_property_read_string(i2c->dev.of_node,
+@@ -1366,6 +1640,21 @@
+ 			class_name_log = DEFAULT_LOG_CLASS_NAME;
+ 		}
+ #endif /* USE_DSM_LOG */
++
++		ret = of_property_read_u32(i2c->dev.of_node,
++				"maxim,sub_reg", &pdata->sub_reg);
++		if (ret) {
++			dev_err(&i2c->dev, "Sub-device register was not found.\n");
++			pdata->sub_reg = 0;
++		}
++
++		ret = of_property_read_u32(i2c->dev.of_node,
++				"maxim,interleave", &pdata->interleave);
++		if (ret) {
++			dev_err(&i2c->dev, "There is no interleave information.\n");
++			pdata->interleave = 0;
++		}
++
+ 	} else {
+ 		pdata->sysclk = 12288000;
+ 		pdata->spk_gain = 0x14;
+@@ -1410,11 +1699,7 @@
+ #ifdef CONFIG_SND_SOC_MAXIM_DSM
+ 	maxdsm_init();
+ 	if (pinfo_status)
+-#ifdef CONFIG_MACH_KACTIVELTE_KOR
+ 		maxdsm_update_info(pdata->pinfo);
+-#else
+-		dev_info(&i2c->dev, "pinfo will be ignored.\n");
+-#endif /* CONFIG_MACH_KACTIVELTE_KOR */
+ #endif /* CONFIG_SND_SOC_MAXIM_DSM */
+ 
+ 	ret = snd_soc_register_codec(&i2c->dev, &soc_codec_dev_max98506,
+@@ -1431,6 +1716,32 @@
+ 		goto err_regmap;
+ 	}
+ 
++	if (pdata->sub_reg != 0)	{
++		max98506->sub_i2c =
++			max98506_add_sub_device(i2c->adapter->nr,
++					pdata->sub_reg);
++		if (IS_ERR(max98506->sub_i2c)) {
++			dev_err(&max98506->sub_i2c->dev,
++					"Second MAX98506 was not found\n");
++			ret = -ENODEV;
++			goto err_regmap;
++		} else {
++			max98506->sub_regmap = regmap_init_i2c(
++					max98506->sub_i2c, &max98506_regmap);
++			if (IS_ERR(max98506->sub_regmap)) {
++				ret = PTR_ERR(max98506->sub_regmap);
++				dev_err(&max98506->sub_i2c->dev,
++					"Failed to allocate sub_regmap: %d\n",
++					ret);
++				goto err_regmap;
++			}
++		}
++	}
++
++	if (max98506_check_revID(max98506->regmap)
++		|| max98506_check_revID(max98506->sub_regmap))
++		max98506_init_status = 1;
++
+ 	msg_maxim("exit, device '%s'", id->name);
+ 
+ 	return 0;
+@@ -1439,7 +1750,8 @@
+ 	snd_soc_unregister_codec(&i2c->dev);
+ 	if (max98506->regmap)
+ 		regmap_exit(max98506->regmap);
+-
++	if (max98506->sub_regmap)
++		regmap_exit(max98506->sub_regmap);
+ err_register_codec:
+ #ifdef CONFIG_SND_SOC_MAXIM_DSM
+ 	maxdsm_deinit();
+@@ -1458,11 +1770,16 @@
+ static int max98506_i2c_remove(struct i2c_client *client)
+ {
+ 	struct max98506_priv *max98506 = i2c_get_clientdata(client);
++	struct max98506_pdata *pdata = max98506->pdata;
+ 
+ 	snd_soc_unregister_codec(&client->dev);
+ 	if (max98506->regmap)
+ 		regmap_exit(max98506->regmap);
+-	devm_kfree(&client->dev, max98506->pdata);
++	if (max98506->sub_regmap)
++		regmap_exit(max98506->sub_regmap);
++	if (pdata->sub_reg != 0)
++		i2c_unregister_device(max98506->sub_i2c);
++	devm_kfree(&client->dev, pdata);
+ 	devm_kfree(&client->dev, max98506);
+ 
+ #ifdef CONFIG_SND_SOC_MAXIM_DSM
+diff -Nur -X dontdiff a/sound/soc/codecs/max98506.h b/sound/soc/codecs/max98506.h
+--- a/sound/soc/codecs/max98506.h	2016-01-24 04:27:36.777472000 -0500
++++ b/sound/soc/codecs/max98506.h	2016-03-24 06:18:57.000000000 -0400
+@@ -394,6 +394,9 @@
+ #define MAX98506_DAI_CHANSZ_MASK			(0x03<<6)
+ #define MAX98506_DAI_CHANSZ_SHIFT			6
+ #define MAX98506_DAI_CHANSZ_WIDTH			2
++#define MAX98506_DAI_INTERLEAVE_MASK			(1<<5)
++#define MAX98506_DAI_INTERLEAVE_SHIFT			5
++#define MAX98506_DAI_INTERLEAVE_WIDTH			1
+ #define MAX98506_DAI_EXTBCLK_HIZ_MASK			(1<<4)
+ #define MAX98506_DAI_EXTBCLK_HIZ_SHIFT			4
+ #define MAX98506_DAI_EXTBCLK_HIZ_WIDTH			1
+@@ -716,6 +719,8 @@
+ 	struct class *dev_log_class;
+ 	struct device *dev_log;
+ #endif /* USE_DSM_LOG */
++	struct i2c_client *sub_i2c;
++	struct regmap *sub_regmap;
+ };
+ 
+ #endif /* _MAX98506_H */
+diff -Nur -X dontdiff a/sound/soc/codecs/maxim_dsm.c b/sound/soc/codecs/maxim_dsm.c
+--- a/sound/soc/codecs/maxim_dsm.c	2016-01-24 04:27:36.778472000 -0500
++++ b/sound/soc/codecs/maxim_dsm.c	2016-03-24 06:18:57.000000000 -0400
+@@ -826,11 +826,15 @@
+ {
+ 	switch (maxdsm.platform_type) {
+ 	case PLATFORM_TYPE_A:
+-		maxdsm_regmap_read(reg, val);
++		if (reg >= START_ADDR_FOR_LSI &&
++			reg <= END_ADDR_FOR_LSI)
++			maxdsm_regmap_read(reg, val);
+ 		break;
+ 	case PLATFORM_TYPE_B:
+-		maxdsm_read_all();
+-		*val = maxdsm.param[reg];
++		if (reg < PARAM_DSM_4_0_MAX) {
++			maxdsm_read_all();
++			*val = maxdsm.param[reg];
++		}
+ 		break;
+ 	}
+ 
+@@ -1030,7 +1034,7 @@
+ 		= kzalloc(sizeof(maxdsm_after_prob_int_log_array), GFP_KERNEL);
+ 
+ 	if (unlikely(!blog_buf || !ilog_buf
+-		|| !after_blog_buf || !after_ilog_buf)) {
++				|| !after_blog_buf || !after_ilog_buf)) {
+ 		rc = -ENOMEM;
+ 		goto abort;
+ 	}
+@@ -1168,16 +1172,16 @@
+ 
+ 	rc += snprintf(buf+rc, PAGE_SIZE,
+ 			"DSM LogData saved at %4d-%02d-%02d %02d:%02d:%02d (UTC)\n",
+-		(int)(maxdsm_log_timestamp.tm_year + 1900),
+-		(int)(maxdsm_log_timestamp.tm_mon + 1),
+-		(int)(maxdsm_log_timestamp.tm_mday),
+-		(int)(maxdsm_log_timestamp.tm_hour),
+-		(int)(maxdsm_log_timestamp.tm_min),
+-		(int)(maxdsm_log_timestamp.tm_sec));
++			(int)(maxdsm_log_timestamp.tm_year + 1900),
++			(int)(maxdsm_log_timestamp.tm_mon + 1),
++			(int)(maxdsm_log_timestamp.tm_mday),
++			(int)(maxdsm_log_timestamp.tm_hour),
++			(int)(maxdsm_log_timestamp.tm_min),
++			(int)(maxdsm_log_timestamp.tm_sec));
+ 
+ 	if ((log_available & 0x1) == 0x1) {
+ 		rc += snprintf(buf+rc, PAGE_SIZE,
+-			"*** Excursion Limit was exceeded.\n");
++				"*** Excursion Limit was exceeded.\n");
+ 		rc += snprintf(buf+rc, PAGE_SIZE,
+ 				"Seq:%d, log_available=%d, version_id:3.1.%d\n",
+ 				seq_count_excur, log_available, version_id);
+@@ -1233,7 +1237,7 @@
+ 
+ 	if ((log_available & 0x2) == 0x2) {
+ 		rc += snprintf(buf+rc, PAGE_SIZE,
+-			"*** Temperature Limit was exceeded.\n");
++				"*** Temperature Limit was exceeded.\n");
+ 		rc += snprintf(buf+rc, PAGE_SIZE,
+ 				"Seq:%d, log_available=%d, version_id:3.1.%d\n",
+ 				seq_count_temp, log_available, version_id);
+@@ -1262,7 +1266,7 @@
+ 				after_coil_temp_log_array[8],
+ 				after_coil_temp_log_array[9]);
+ 		rc += snprintf(buf+rc, PAGE_SIZE,
+-			"Excursion={ %d, %d, %d, %d, %d, %d, %d, %d, %d, %d,\n",
++				"Excursion={ %d, %d, %d, %d, %d, %d, %d, %d, %d, %d,\n",
+ 				excur_log_array[0],
+ 				excur_log_array[1],
+ 				excur_log_array[2],
+@@ -1286,7 +1290,7 @@
+ 				after_excur_log_array[8],
+ 				after_excur_log_array[9]);
+ 		rc += snprintf(buf+rc, PAGE_SIZE,
+-			"Rdc={ %d, %d, %d, %d, %d, %d, %d, %d, %d, %d,\n",
++				"Rdc={ %d, %d, %d, %d, %d, %d, %d, %d, %d, %d,\n",
+ 				rdc_log_array[0],
+ 				rdc_log_array[1],
+ 				rdc_log_array[2],
+@@ -1298,7 +1302,7 @@
+ 				rdc_log_array[8],
+ 				rdc_log_array[9]);
+ 		rc += snprintf(buf+rc, PAGE_SIZE,
+-			"      %d, %d, %d, %d, %d, %d, %d, %d, %d, %d }\n",
++				"      %d, %d, %d, %d, %d, %d, %d, %d, %d, %d }\n",
+ 				after_rdc_log_array[0],
+ 				after_rdc_log_array[1],
+ 				after_rdc_log_array[2],
+@@ -1310,7 +1314,7 @@
+ 				after_rdc_log_array[8],
+ 				after_rdc_log_array[9]);
+ 		rc += snprintf(buf+rc, PAGE_SIZE,
+-			"Frequency={ %d, %d, %d, %d, %d, %d, %d, %d, %d, %d,\n",
++				"Frequency={ %d, %d, %d, %d, %d, %d, %d, %d, %d, %d,\n",
+ 				freq_log_array[0],
+ 				freq_log_array[1],
+ 				freq_log_array[2],
+@@ -1345,7 +1349,7 @@
+ 				maxdsm.param[param_voice_coil],
+ 				maxdsm.param[param_thermal_limit]);
+ 		rc += snprintf(buf+rc, PAGE_SIZE,
+-			"releasetime:0x%x\n",
++				"releasetime:0x%x\n",
+ 				maxdsm.param[param_release_time]);
+ 		rc += snprintf(buf+rc, PAGE_SIZE,
+ 				"[Parameter Set] staticgain:0x%x, ",
+@@ -1742,7 +1746,7 @@
+ 	dbg_maxdsm("version=%d, platform_type=%d",
+ 			maxdsm->version, maxdsm->platform_type);
+ 
+-		return 0;
++	return 0;
+ }
+ 
+ int maxdsm_update_info(uint32_t *pinfo)
+@@ -1788,6 +1792,55 @@
+ }
+ EXPORT_SYMBOL_GPL(maxdsm_get_tx_mod_id);
+ 
++int maxdsm_get_spk_state(void)
++{
++	return maxdsm.spk_state;
++}
++EXPORT_SYMBOL_GPL(maxdsm_get_spk_state);
++
++void maxdsm_set_spk_state(int state)
++{
++	maxdsm.spk_state = state;
++}
++EXPORT_SYMBOL_GPL(maxdsm_set_spk_state);
++
++int maxdsm_set_pilot_signal_state(int on)
++{
++	int ret = 0;
++
++	/* update dsm parameters */
++	maxdsm.filter_set = DSM_ID_FILTER_GET_AFE_PARAMS;
++	ret = maxdsm_dsm_open(&maxdsm);
++	if (ret)
++		goto error;
++
++	/* feature_set parameter is set by pilot signal off */
++	maxdsm.param[PARAM_WRITE_FLAG] = FLAG_WRITE_FEATURE_ONLY;
++	maxdsm.param[PARAM_FEATURE_SET] =
++		on ? maxdsm.param[PARAM_FEATURE_SET] & ~0x200
++		: maxdsm.param[PARAM_FEATURE_SET] | 0x200;
++	maxdsm.filter_set = DSM_ID_FILTER_SET_AFE_CNTRLS;
++	ret = maxdsm_dsm_open(&maxdsm);
++	if (ret)
++		goto error;
++	else {
++		if (on == 0)
++			usleep_range(179999, 180000);
++	}
++
++	/* check feature_set parameter */
++	maxdsm.filter_set = DSM_ID_FILTER_GET_AFE_PARAMS;
++	ret = maxdsm_dsm_open(&maxdsm);
++	if (!(maxdsm.param[PARAM_FEATURE_SET] & 0x200)) {
++		dbg_maxdsm("Feature set param was not updated. 0x%08x",
++				maxdsm.param[PARAM_FEATURE_SET]);
++		ret = -EAGAIN;
++	}
++
++error:
++	return ret;
++}
++
+ static int maxdsm_validation_check(uint32_t flag)
+ {
+ 	int ret = 0;
+@@ -1830,19 +1883,19 @@
+ 						x, g_pbi[x].addr, g_pbi[x].val);
+ 			}
+ 		}
+-				break;
++		break;
+ 	case PLATFORM_TYPE_B:
+ 		for (x = 0; x < maxdsm.param_size; x += 2)	{
+ 			maxdsm.param[x] = g_pbi[x>>1].val;
+ 			maxdsm.param[x+1] = 1 << maxdsm.binfo[x>>1];
+ 			dbg_maxdsm("[%d]: 0x%08x / 0x%08x",
+ 					x, maxdsm.param[x], maxdsm.param[x+1]);
+-			}
++		}
+ 		maxdsm.param[PARAM_WRITE_FLAG] = FLAG_WRITE_ALL;
+ 		maxdsm.filter_set = DSM_ID_FILTER_SET_AFE_CNTRLS;
+ 		maxdsm_dsm_open(&maxdsm);
+ 		break;
+-		}
++	}
+ 
+ 	return ret;
+ }
+@@ -2034,7 +2087,7 @@
+ 	case PLATFORM_TYPE_B:
+ 		ret = maxdsm_validation_check(maxdsm.param[PARAM_WRITE_FLAG]);
+ 		if (!ret) {
+-		/* set params from the algorithm to application */
++			/* set params from the algorithm to application */
+ 			maxdsm.filter_set = DSM_ID_FILTER_SET_AFE_CNTRLS;
+ 			maxdsm_dsm_open(&maxdsm);
+ 		}
+@@ -2053,19 +2106,19 @@
+ }
+ 
+ static const struct file_operations dsm_ctrl_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= maxdsm_open,
+-	.release	= NULL,
++	.owner			= THIS_MODULE,
++	.open			= maxdsm_open,
++	.release		= NULL,
+ 	.unlocked_ioctl = maxdsm_ioctl,
+ #ifdef CONFIG_COMPAT
+ 	.compat_ioctl	= maxdsm_compat_ioctl,
+ #endif /* CONFIG_COMPAT */
+-	.read		= maxdsm_read,
+-	.write		= maxdsm_write,
+-	.mmap		= NULL,
+-	.poll		= NULL,
+-	.fasync		= NULL,
+-	.llseek		= NULL,
++	.read			= maxdsm_read,
++	.write			= maxdsm_write,
++	.mmap			= NULL,
++	.poll			= NULL,
++	.fasync			= NULL,
++	.llseek			= NULL,
+ };
+ 
+ static struct miscdevice dsm_ctrl_miscdev = {
+diff -Nur -X dontdiff a/sound/soc/codecs/maxim_dsm_cal.c b/sound/soc/codecs/maxim_dsm_cal.c
+--- a/sound/soc/codecs/maxim_dsm_cal.c	2016-01-24 04:27:36.778472000 -0500
++++ b/sound/soc/codecs/maxim_dsm_cal.c	2016-03-24 06:18:57.000000000 -0400
+@@ -596,7 +596,7 @@
+ 
+ 	mdc->info.min = 0;
+ 	mdc->info.max = 0xFFFFFFFF;
+-	mdc->info.duration = 2000; /* 2 secs */
++	mdc->info.duration = 1500; /* 1.5 secs */
+ 	mdc->info.remaining = mdc->info.duration;
+ 	mdc->info.interval = 100;
+ 	mdc->info.ignored_t = 1000;
+diff -Nur -X dontdiff a/sound/soc/codecs/msm8x10-wcd.c b/sound/soc/codecs/msm8x10-wcd.c
+--- a/sound/soc/codecs/msm8x10-wcd.c	2016-01-24 04:27:36.779472000 -0500
++++ b/sound/soc/codecs/msm8x10-wcd.c	2016-03-24 06:18:57.000000000 -0400
+@@ -1725,7 +1725,7 @@
+ 		/* Always pull up TxFe for TX2 to Micbias */
+ 		snd_soc_update_bits(codec, micb_int_reg, 0x04, 0x04);
+ 		if (++msm8x10_wcd->micb_en_count == 1)
+-		snd_soc_update_bits(codec, MSM8X10_WCD_A_MICB_1_CTL,
++			snd_soc_update_bits(codec, MSM8X10_WCD_A_MICB_1_CTL,
+ 					0x80, 0x80);
+ 		pr_debug("%s micb_en_count : %d", __func__,
+ 				msm8x10_wcd->micb_en_count);
+@@ -1737,7 +1737,7 @@
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+ 		if (--msm8x10_wcd->micb_en_count == 0)
+-		snd_soc_update_bits(codec, MSM8X10_WCD_A_MICB_1_CTL,
++			snd_soc_update_bits(codec, MSM8X10_WCD_A_MICB_1_CTL,
+ 					0x80, 0x00);
+ 		pr_debug("%s micb_en_count : %d", __func__,
+ 				msm8x10_wcd->micb_en_count);
+diff -Nur -X dontdiff a/sound/soc/codecs/wcd9306.c b/sound/soc/codecs/wcd9306.c
+--- a/sound/soc/codecs/wcd9306.c	2016-01-24 04:27:36.781473000 -0500
++++ b/sound/soc/codecs/wcd9306.c	2016-03-24 06:18:57.000000000 -0400
+@@ -39,7 +39,7 @@
+ #include "wcd9xxx-resmgr.h"
+ #include "wcd9xxx-common.h"
+ 
+-#define TAPAN_HPH_PA_SETTLE_COMP_ON 3000
++#define TAPAN_HPH_PA_SETTLE_COMP_ON 5000
+ #define TAPAN_HPH_PA_SETTLE_COMP_OFF 13000
+ 
+ #if defined(CONFIG_SND_SOC_ES705)
+@@ -1113,6 +1113,45 @@
+ static const struct snd_kcontrol_new class_h_dsm_mux =
+ 	SOC_DAPM_ENUM("CLASS_H_DSM MUX Mux", class_h_dsm_enum);
+ 
++static const char * const rx1_interpolator_text[] = {
++	"ZERO", "RX1 MIX2"
++};
++
++static const struct soc_enum rx1_interpolator_enum =
++	SOC_ENUM_SINGLE(0, 0, 2, rx1_interpolator_text);
++
++static const struct snd_kcontrol_new rx1_interpolator =
++	SOC_DAPM_ENUM_VIRT("RX1 INTERPOLATOR Mux", rx1_interpolator_enum);
++
++static const char * const rx2_interpolator_text[] = {
++	"ZERO", "RX2 MIX2"
++};
++
++static const struct soc_enum rx2_interpolator_enum =
++	SOC_ENUM_SINGLE(0, 1, 2, rx2_interpolator_text);
++
++static const struct snd_kcontrol_new rx2_interpolator =
++	SOC_DAPM_ENUM_VIRT("RX2 INTERPOLATOR Mux", rx2_interpolator_enum);
++
++static int tapan_hph_impedance_get(struct snd_kcontrol *kcontrol,
++				   struct snd_ctl_elem_value *ucontrol)
++{
++	uint32_t zl, zr;
++	bool hphr;
++	struct soc_multi_mixer_control *mc;
++	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
++	struct tapan_priv *priv = snd_soc_codec_get_drvdata(codec);
++
++	mc = (struct soc_multi_mixer_control *)(kcontrol->private_value);
++
++	hphr = mc->shift;
++	wcd9xxx_mbhc_get_impedance(&priv->mbhc, &zl, &zr);
++	pr_debug("%s: zl %u, zr %u\n", __func__, zl, zr);
++	ucontrol->value.integer.value[0] = hphr ? zr : zl;
++
++	return 0;
++}
++
+ static const struct snd_kcontrol_new tapan_common_snd_controls[] = {
+ 
+ 	SOC_ENUM_EXT("EAR PA Gain", tapan_ear_pa_gain_enum[0],
+@@ -1223,6 +1262,11 @@
+ 	tapan_get_iir_band_audio_mixer, tapan_put_iir_band_audio_mixer),
+ 	SOC_SINGLE_MULTI_EXT("IIR2 Band5", IIR2, BAND5, 255, 0, 5,
+ 	tapan_get_iir_band_audio_mixer, tapan_put_iir_band_audio_mixer),
++
++	SOC_SINGLE_EXT("HPHL Impedance", 0, 0, UINT_MAX, 0,
++		       tapan_hph_impedance_get, NULL),
++	SOC_SINGLE_EXT("HPHR Impedance", 0, 1, UINT_MAX, 0,
++		       tapan_hph_impedance_get, NULL),
+ };
+ 
+ static const struct snd_kcontrol_new tapan_9306_snd_controls[] = {
+@@ -2255,40 +2299,36 @@
+ {
+ 	struct snd_soc_codec *codec = w->codec;
+ 	struct tapan_priv *tapan = snd_soc_codec_get_drvdata(codec);
+-	u16 micb_int_reg, micb_ctl_reg;
++	u16 micb_int_reg = 0, micb_ctl_reg = 0;
+ 	u8 cfilt_sel_val = 0;
+ 	char *internal1_text = "Internal1";
+ 	char *internal2_text = "Internal2";
+ 	char *internal3_text = "Internal3";
+ 	enum wcd9xxx_notify_event e_post_off, e_pre_on, e_post_on;
+ 
+-	dev_dbg(codec->dev, "%s %d, shift = %d\n", __func__, event, w->shift);
+-	switch (w->shift) {
+-	case 1:
++	pr_debug("%s: w->name %s event %d\n", __func__, w->name, event);
++	if (strnstr(w->name, "MIC BIAS1", sizeof("MIC BIAS1"))) {
+ 		micb_ctl_reg = TAPAN_A_MICB_1_CTL;
+ 		micb_int_reg = TAPAN_A_MICB_1_INT_RBIAS;
+ 		cfilt_sel_val = tapan->resmgr.pdata->micbias.bias1_cfilt_sel;
+ 		e_pre_on = WCD9XXX_EVENT_PRE_MICBIAS_1_ON;
+ 		e_post_on = WCD9XXX_EVENT_POST_MICBIAS_1_ON;
+ 		e_post_off = WCD9XXX_EVENT_POST_MICBIAS_1_OFF;
+-		break;
+-	case 2:
++	} else if (strnstr(w->name, "MIC BIAS2", sizeof("MIC BIAS2"))) {
+ 		micb_ctl_reg = TAPAN_A_MICB_2_CTL;
+ 		micb_int_reg = TAPAN_A_MICB_2_INT_RBIAS;
+ 		cfilt_sel_val = tapan->resmgr.pdata->micbias.bias2_cfilt_sel;
+ 		e_pre_on = WCD9XXX_EVENT_PRE_MICBIAS_2_ON;
+ 		e_post_on = WCD9XXX_EVENT_POST_MICBIAS_2_ON;
+ 		e_post_off = WCD9XXX_EVENT_POST_MICBIAS_2_OFF;
+-		break;
+-	case 3:
++	} else if (strnstr(w->name, "MIC BIAS3", sizeof("MIC BIAS3"))) {
+ 		micb_ctl_reg = TAPAN_A_MICB_3_CTL;
+ 		micb_int_reg = TAPAN_A_MICB_3_INT_RBIAS;
+ 		cfilt_sel_val = tapan->resmgr.pdata->micbias.bias3_cfilt_sel;
+ 		e_pre_on = WCD9XXX_EVENT_PRE_MICBIAS_3_ON;
+ 		e_post_on = WCD9XXX_EVENT_POST_MICBIAS_3_ON;
+ 		e_post_off = WCD9XXX_EVENT_POST_MICBIAS_3_OFF;
+-		break;
+-	default:
++	} else {
+ 		pr_err("%s: Error, invalid micbias %s\n", __func__, w->name);
+ 		return -EINVAL;
+ 	}
+@@ -2324,33 +2364,27 @@
+ 
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMU:
+-		if (w->shift ==2) {
+-			if (++tapan->micb_2_ref_cnt == 1) {
+-				snd_soc_update_bits(codec, micb_ctl_reg, 0x80, 0x80);
+-				usleep_range(20000, 20000);
+-			} else {
+-				dev_dbg(codec->dev, "MIC BIAS2 already enabled, ref_count = %d",
+-						tapan->micb_2_ref_cnt);
+-			}
+-		} else {
+-			snd_soc_update_bits(codec, micb_ctl_reg, 0x80, 0x80);
+-			usleep_range(20000, 20000);
+-		}
++		usleep_range(20000, 20000);
+ 		/* Let MBHC module know so micbias is on */
+ 		wcd9xxx_resmgr_notifier_call(&tapan->resmgr, e_post_on);
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+-		if (w->shift ==2) {
+-			if (--tapan->micb_2_ref_cnt <= 0) {
+-				snd_soc_update_bits(codec, micb_ctl_reg, 0x80, 0x00);
+-				tapan->micb_2_ref_cnt = 0;
+-				dev_dbg(codec->dev, "MIC BIAS2 disabled\n");
+-			} else {
+-				dev_dbg(codec->dev, "micbias2 is still needed, do not turn off\n");
+-			}
+-		} else {
+-				snd_soc_update_bits(codec, micb_ctl_reg, 0x80, 0x00);
+-		}
++		if (micb_ctl_reg == TAPAN_A_MICB_2_CTL) {
++			if (--tapan->micb_2_users == 0)
++				wcd9xxx_resmgr_rm_cond_update_bits(
++						&tapan->resmgr,
++						WCD9XXX_COND_HPH_MIC,
++						micb_ctl_reg, 7,
++						false);
++			pr_debug("%s: micb_2_users %d\n", __func__,
++				 tapan->micb_2_users);
++			WARN(tapan->micb_2_users < 0,
++				"Unexpected micbias users %d\n",
++				tapan->micb_2_users);
++		} else
++			snd_soc_update_bits(codec, micb_ctl_reg, 1 << w->shift,
++					    0);
++
+ 		/* Let MBHC module know so micbias switch to be off */
+ 		wcd9xxx_resmgr_notifier_call(&tapan->resmgr, e_post_off);
+ 
+@@ -3225,8 +3259,10 @@
+ 	{"SPK PA", NULL, "SPK DAC"},
+ 	{"SPK DAC", NULL, "VDD_SPKDRV"},
+ 
+-	{"RX1 CHAIN", NULL, "RX1 MIX2"},
+-	{"RX2 CHAIN", NULL, "RX2 MIX2"},
++	{"RX1 INTERPOLATOR", NULL, "RX1 MIX2"},
++	{"RX1 CHAIN", NULL, "RX1 INTERPOLATOR"},
++	{"RX2 INTERPOLATOR", NULL, "RX2 MIX2"},
++	{"RX2 CHAIN", NULL, "RX2 INTERPOLATOR"},
+ 	{"CLASS_H_DSM MUX", "RX_HPHL", "RX1 CHAIN"},
+ 
+ 	{"LINEOUT1 DAC", NULL, "RX_BIAS"},
+@@ -4843,11 +4879,12 @@
+ 		usleep_range(5000, 5010);
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
++		usleep_range(5000, 5010);
++		snd_soc_update_bits(codec, TAPAN_A_RX_EAR_EN, 0x40, 0x00);
+ 		wcd9xxx_clsh_fsm(codec, &tapan_p->clsh_d,
+ 						 WCD9XXX_CLSH_STATE_EAR,
+ 						 WCD9XXX_CLSH_REQ_DISABLE,
+ 						 WCD9XXX_CLSH_EVENT_POST_PA);
+-		usleep_range(5000, 5010);
+ 	}
+ 	return 0;
+ }
+@@ -5174,16 +5211,22 @@
+ 	SND_SOC_DAPM_MIXER("RX1 MIX1", SND_SOC_NOPM, 0, 0, NULL, 0),
+ 	SND_SOC_DAPM_MIXER("RX2 MIX1", SND_SOC_NOPM, 0, 0, NULL, 0),
+ 
+-	SND_SOC_DAPM_MIXER_E("RX1 MIX2", TAPAN_A_CDC_CLK_RX_B1_CTL, 0, 0, NULL,
+-		0, tapan_codec_enable_interpolator, SND_SOC_DAPM_PRE_PMU |
+-		SND_SOC_DAPM_POST_PMU),
+-	SND_SOC_DAPM_MIXER_E("RX2 MIX2", TAPAN_A_CDC_CLK_RX_B1_CTL, 1, 0, NULL,
+-		0, tapan_codec_enable_interpolator, SND_SOC_DAPM_PRE_PMU |
+-		SND_SOC_DAPM_POST_PMU),
++	SND_SOC_DAPM_MIXER("RX1 MIX2", SND_SOC_NOPM, 0, 0, NULL, 0),
++	SND_SOC_DAPM_MIXER("RX2 MIX2", SND_SOC_NOPM, 0, 0, NULL, 0),
++
+ 	SND_SOC_DAPM_MIXER_E("RX3 MIX1", TAPAN_A_CDC_CLK_RX_B1_CTL, 2, 0, NULL,
+ 		0, tapan_codec_enable_interpolator, SND_SOC_DAPM_PRE_PMU |
+ 		SND_SOC_DAPM_POST_PMU),
+ 
++	SND_SOC_DAPM_VIRT_MUX_E("RX1 INTERPOLATOR",
++		TAPAN_A_CDC_CLK_RX_B1_CTL, 0, 0,
++		&rx1_interpolator, tapan_codec_enable_interpolator,
++		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
++	SND_SOC_DAPM_VIRT_MUX_E("RX2 INTERPOLATOR",
++		TAPAN_A_CDC_CLK_RX_B1_CTL, 1, 0,
++		&rx2_interpolator, tapan_codec_enable_interpolator,
++		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
++
+ 	SND_SOC_DAPM_MIXER("RX1 CHAIN", TAPAN_A_CDC_RX1_B6_CTL, 5, 0,
+ 						NULL, 0),
+ 
+@@ -6593,11 +6636,11 @@
+ 
+ }
+ 
+-static int tapan_check_wcd9306(struct device *cdc_dev, bool sensed)
++static bool tapan_check_wcd9306(struct device *cdc_dev, bool sensed)
+ {
+ 	struct wcd9xxx *core = dev_get_drvdata(cdc_dev->parent);
+ 	u8 reg_val;
+-	int ret = 1;
++	bool ret = true;
+ 	unsigned long timeout;
+ 	bool timedout;
+ 	struct wcd9xxx_core_resource *core_res = &core->core_res;
+@@ -6624,7 +6667,7 @@
+ 	if (wcd9xxx_reg_read(core_res, TAPAN_A_QFUSE_DATA_OUT1) ||
+ 	    wcd9xxx_reg_read(core_res, TAPAN_A_QFUSE_DATA_OUT2)) {
+ 		dev_info(cdc_dev, "%s: wcd9302 detected\n", __func__);
+-		ret = 0;
++		ret = false;
+ 	} else
+ 		dev_info(cdc_dev, "%s: wcd9306 detected\n", __func__);
+ 
+@@ -6908,13 +6951,13 @@
+ static int __devinit tapan_probe(struct platform_device *pdev)
+ {
+ 	int ret = 0;
+-	int is_wcd9306;
++	bool is_wcd9306;
+ 
+ 	is_wcd9306 = tapan_check_wcd9306(&pdev->dev, false);
+ 	if (is_wcd9306 < 0) {
+ 		dev_info(&pdev->dev, "%s: cannot find codec type, default to 9306\n",
+ 			 __func__);
+-		is_wcd9306 = 1;
++		is_wcd9306 = true;
+ 	}
+ 	codec_ver = is_wcd9306 ? WCD9306 : WCD9302;
+ 
+diff -Nur -X dontdiff a/sound/soc/codecs/wcd9320.c b/sound/soc/codecs/wcd9320.c
+--- a/sound/soc/codecs/wcd9320.c	2016-01-24 04:27:36.783473000 -0500
++++ b/sound/soc/codecs/wcd9320.c	2016-03-24 06:18:57.000000000 -0400
+@@ -2731,12 +2731,12 @@
+ 		dev_dbg(codec->dev, "%s: using hwdep calibration\n",
+ 				__func__);
+ 	} else {
+-	ret = request_firmware(&fw, filename, codec->dev);
+-	if (ret != 0) {
++		ret = request_firmware(&fw, filename, codec->dev);
++		if (ret != 0) {
+ 			pr_err("Failed to acquire MAD firwmare data %s: %d\n",
+ 				filename, ret);
+-		return -ENODEV;
+-	}
++			return -ENODEV;
++		}
+ 		if (!fw) {
+ 			dev_err(codec->dev, "failed to get mad fw");
+ 			return -ENODEV;
+@@ -3398,12 +3398,12 @@
+ 			dev_dbg(codec->dev, "%s: using hwdep calibration\n",
+ 				__func__);
+ 		} else {
+-		ret = request_firmware(&fw, filename, codec->dev);
+-		if (ret != 0) {
+-			dev_err(codec->dev, "Failed to acquire ANC data: %d\n",
+-				ret);
+-			return -ENODEV;
+-		}
++			ret = request_firmware(&fw, filename, codec->dev);
++			if (ret != 0) {
++				dev_err(codec->dev, "Failed to acquire ANC data: %d\n",
++					ret);
++				return -ENODEV;
++			}
+ 			if (!fw) {
+ 				dev_err(codec->dev, "failed to get anc fw");
+ 				return -ENODEV;
+@@ -3470,7 +3470,7 @@
+ 				(val & mask));
+ 		}
+ 		if (!hwdep_cal)
+-		release_firmware(fw);
++			release_firmware(fw);
+ 		break;
+ 	case SND_SOC_DAPM_PRE_PMD:
+ 		msleep(40);
+@@ -7656,7 +7656,7 @@
+ 
+ err_irq:
+ 	taiko_cleanup_irqs(taiko);
+-	kfree(ptr);
++        kfree(ptr);
+ err_hwdep:
+ 	kfree(taiko->fw_data);
+ err_nomem_slimch:
+diff -Nur -X dontdiff a/sound/soc/codecs/wcd9xxx-common.c b/sound/soc/codecs/wcd9xxx-common.c
+--- a/sound/soc/codecs/wcd9xxx-common.c	2016-01-24 04:23:20.625447000 -0500
++++ b/sound/soc/codecs/wcd9xxx-common.c	2016-03-24 06:18:57.000000000 -0400
+@@ -952,7 +952,6 @@
+ 		if ((clsh_d->state == WCD9XXX_CLSH_STATE_LO) ||
+ 			(req_state == WCD9XXX_CLSH_STATE_LO)) {
+ 			wcd9xxx_dynamic_bypass_buck_ctrl_lo(codec, false);
+-			wcd9xxx_enable_buck(codec, clsh_d, true);
+ 			wcd9xxx_set_fclk_get_ncp(codec, clsh_d,
+ 						NCP_FCLK_LEVEL_8);
+ 			if (req_state & WCD9XXX_CLSH_STATE_HPH_ST) {
+diff -Nur -X dontdiff a/sound/soc/codecs/wcd9xxx-mbhc.c b/sound/soc/codecs/wcd9xxx-mbhc.c
+--- a/sound/soc/codecs/wcd9xxx-mbhc.c	2016-03-12 00:27:15.852761000 -0500
++++ b/sound/soc/codecs/wcd9xxx-mbhc.c	2016-03-24 06:18:57.000000000 -0400
+@@ -470,8 +470,8 @@
+ }
+ 
+ void *wcd9xxx_mbhc_cal_btn_det_mp(
+-			    struct wcd9xxx_mbhc_btn_detect_cfg *btn_det,
+-			    enum wcd9xxx_mbhc_btn_det_mem mem)
++			    const struct wcd9xxx_mbhc_btn_detect_cfg *btn_det,
++			    const enum wcd9xxx_mbhc_btn_det_mem mem)
+ {
+ 	void *ret = &btn_det->_v_btn_low;
+ 
+@@ -3227,9 +3227,13 @@
+ 				      &mbhc->correct_plug_swch);
+ 
+ 		if ((mbhc->current_plug != PLUG_TYPE_NONE) &&
++		    (mbhc->current_plug != PLUG_TYPE_HIGH_HPH) &&
+ 		    !(snd_soc_read(codec, WCD9XXX_A_MBHC_INSERT_DETECT) &
+-				   (1 << 1)))
++				   (1 << 1))) {
++			pr_debug("%s: current plug: %d\n", __func__,
++				mbhc->current_plug);
+ 			goto exit;
++		}
+ 
+ 		/* Disable Mic Bias pull down and HPH Switch to GND */
+ 		snd_soc_update_bits(codec, mbhc->mbhc_bias_regs.ctl_reg, 0x01,
+@@ -4220,13 +4224,13 @@
+ 	while (retry < FW_READ_ATTEMPTS) {
+ 		retry++;
+ 		pr_debug("%s:Attempt %d to request MBHC firmware\n",
+-			__func__, retry);
++                               __func__, retry);
+ 		if (mbhc->mbhc_cb->get_hwdep_fw_cal)
+ 			fw_data = mbhc->mbhc_cb->get_hwdep_fw_cal(codec,
+ 					WCD9XXX_MBHC_CAL);
+ 		if (!fw_data)
+-		ret = request_firmware(&fw, "wcd9320/wcd9320_mbhc.bin",
+-				       codec->dev);
++			ret = request_firmware(&fw, "wcd9320/wcd9320_mbhc.bin",
++                                       codec->dev);
+ 		/*
+ 		* if request_firmware and hwdep cal both fail then
+ 		* retry for few times before bailing out
+@@ -4244,7 +4248,7 @@
+ 		pr_debug("%s: using hwdep cal\n", __func__);
+ 	if (ret != 0 && !fw_data) {
+ 		pr_err("%s: Cannot load MBHC firmware use default cal\n",
+-		       __func__);
++			__func__);
+ 		use_default_cal = true;
+ 	}
+ 	if (!use_default_cal) {
+@@ -4259,11 +4263,11 @@
+ 			size = fw->size;
+ 		}
+ 		if (wcd9xxx_mbhc_fw_validate(data, size) == false) {
+-		pr_err("%s: Invalid MBHC cal data size use default cal\n",
+-		       __func__);
++			pr_err("%s: Invalid MBHC cal data size use default cal\n",
++				__func__);
+ 			if (!fw_data)
+-		release_firmware(fw);
+-	} else {
++				release_firmware(fw);
++		} else {
+ 			if (fw_data) {
+ 				mbhc->mbhc_cfg->calibration =
+ 						(void *)fw_data->data;
+@@ -4271,8 +4275,8 @@
+ 			} else {
+ 				mbhc->mbhc_cfg->calibration =
+ 						(void *)fw->data;
+-		mbhc->mbhc_fw = fw;
+-	}
++				mbhc->mbhc_fw = fw;
++			}
+ 		}
+ 
+ 	}
+@@ -4486,7 +4490,7 @@
+ 	if (mbhc->mbhc_fw || mbhc->mbhc_cal) {
+ 		cancel_delayed_work_sync(&mbhc->mbhc_firmware_dwork);
+ 		if (!mbhc->mbhc_cal)
+-		release_firmware(mbhc->mbhc_fw);
++			release_firmware(mbhc->mbhc_fw);
+ 		mbhc->mbhc_fw = NULL;
+ 		mbhc->mbhc_cal = NULL;
+ 	}
+diff -Nur -X dontdiff a/sound/soc/codecs/wcd9xxx-mbhc.h b/sound/soc/codecs/wcd9xxx-mbhc.h
+--- a/sound/soc/codecs/wcd9xxx-mbhc.h	2016-03-12 00:27:15.853761000 -0500
++++ b/sound/soc/codecs/wcd9xxx-mbhc.h	2016-03-24 06:18:57.000000000 -0400
+@@ -445,8 +445,8 @@
+ 		      bool impedance_det_en);
+ void wcd9xxx_mbhc_deinit(struct wcd9xxx_mbhc *mbhc);
+ void *wcd9xxx_mbhc_cal_btn_det_mp(
+-			    struct wcd9xxx_mbhc_btn_detect_cfg *btn_det,
+-			    enum wcd9xxx_mbhc_btn_det_mem mem);
++			    const struct wcd9xxx_mbhc_btn_detect_cfg *btn_det,
++			    const enum wcd9xxx_mbhc_btn_det_mem mem);
+ int wcd9xxx_mbhc_get_impedance(struct wcd9xxx_mbhc *mbhc, uint32_t *zl,
+ 			       uint32_t *zr);
+ #endif /* __WCD9XXX_MBHC_H__ */
+diff -Nur -X dontdiff a/sound/soc/msm/msm8974.c b/sound/soc/msm/msm8974.c
+--- a/sound/soc/msm/msm8974.c	2016-01-24 04:27:36.789473000 -0500
++++ b/sound/soc/msm/msm8974.c	2016-03-24 06:18:58.000000000 -0400
+@@ -150,7 +150,7 @@
+ 	.detect_extn_cable = true,
+ #if defined(CONFIG_SEC_FACTORY)
+ 	/* Micbias for MBHC is always on in factory test */
+-	.micbias_enable_flags = (1 << MBHC_MICBIAS_ENABLE_THRESHOLD_HEADSET | 
++	.micbias_enable_flags = (1 << MBHC_MICBIAS_ENABLE_THRESHOLD_HEADSET |
+ 	1 << MBHC_MICBIAS_ENABLE_REGULAR_HEADSET),
+ #else
+ 	.micbias_enable_flags = 1 << MBHC_MICBIAS_ENABLE_THRESHOLD_HEADSET,
+@@ -962,12 +962,12 @@
+ 	SND_SOC_DAPM_MIC("Headset Mic", msm_earmic_bias_event),
+ #else
+ 	SND_SOC_DAPM_MIC("Headset Mic", NULL),
+-#endif	
++#endif
+ #if defined(CONFIG_LDO_SUBMIC_BIAS)
+ 	SND_SOC_DAPM_MIC("Sub Mic", msm_submic_bias_event),
+ #else
+ 	SND_SOC_DAPM_MIC("Sub Mic", NULL),
+-#endif	
++#endif
+ 	SND_SOC_DAPM_MIC("Third Mic", NULL),
+ 
+ 	SND_SOC_DAPM_MIC("Digital Mic1", NULL),
+@@ -1731,8 +1731,8 @@
+ 
+ 	rate->min = rate->max = 48000;
+ 	channels->min = channels->max = 2;
+-    param_set_mask(params, SNDRV_PCM_HW_PARAM_FORMAT,
+-    		SNDRV_PCM_FORMAT_S16_LE);
++	param_set_mask(params, SNDRV_PCM_HW_PARAM_FORMAT,
++			SNDRV_PCM_FORMAT_S16_LE);
+ 
+ 	return 0;
+ }
+@@ -1745,7 +1745,7 @@
+ 	struct snd_interval *rate =
+ 			hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
+ 	struct snd_interval *channels =
+-	    hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
++			hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
+ 
+ 	pr_debug("%s()\n", __func__);
+ 
+@@ -2299,10 +2299,10 @@
+ 			ret = afe_set_lpass_clock(port_id, &lpass_mi2s_disable);
+ 		else if(substream->stream == 1)
+ 			ret = afe_set_lpass_clock(port_id, &lpass_mi2s_disable);
+-       		
+-       		if (ret < 0) {	
+-      			pr_err("%s: afe_set_lpass_clock failed\n", __func__);	
+-      		}	
++
++		if (ret < 0) {
++			pr_err("%s: afe_set_lpass_clock failed\n", __func__);
++		}
+ 		msm8974_pri_mi2s_free_gpios();
+ 	}
+ }
+@@ -2317,7 +2317,7 @@
+ 				pri_mi2s_gpio[i].gpio_name);
+ 
+ 		pr_debug("%s: gpio = %d, gpio name = %s, rtn = %d\n", __func__,
+-		pri_mi2s_gpio[i].gpio_no, pri_mi2s_gpio[i].gpio_name, rtn);		
++		pri_mi2s_gpio[i].gpio_no, pri_mi2s_gpio[i].gpio_name, rtn);
+ 		if (rtn) {
+ 			pr_err("%s: Failed to request gpio %d\n",
+ 				   __func__,
+@@ -2345,7 +2345,7 @@
+ 
+ 	if (atomic_inc_return(&pri_mi2s_clk.mi2s_rsc_ref) == 1) {
+ 		pr_info("%s: acquire mi2s resources\n", __func__);
+-		msm8974_configure_pri_mi2s_gpio();	
++		msm8974_configure_pri_mi2s_gpio();
+ 
+ #if defined (CONFIG_TERT_MI2S_ENABLE)
+ 		port_id = AFE_PORT_ID_TERTIARY_MI2S_RX;
+@@ -2356,10 +2356,10 @@
+ 			ret = afe_set_lpass_clock(port_id, &lpass_mi2s_enable);
+ 		else if(substream->stream == 1)
+ 			ret = afe_set_lpass_clock(port_id, &lpass_mi2s_enable);
+-       		if (ret < 0) {	
+-      			pr_err("%s: afe_set_lpass_clock failed\n", __func__);	
+-       		return ret;	
+-      		}	
++		if (ret < 0) {
++			pr_err("%s: afe_set_lpass_clock failed\n", __func__);
++			return ret;
++		}
+ 
+ 		ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_CBS_CFS);
+ 		if (ret < 0)
+@@ -2369,12 +2369,12 @@
+ 		ret = snd_soc_dai_set_fmt(codec_dai,
+ 				SND_SOC_DAIFMT_I2S |
+ 				SND_SOC_DAIFMT_NB_NF |
+-                		SND_SOC_DAIFMT_CBS_CFS);
++				SND_SOC_DAIFMT_CBS_CFS);
+ 		if (ret < 0)
+ 			dev_err(codec_dai->dev, "set format for codec dai"
+ 				 " failed\n");
+ 
+-		ret  = 0;
++		ret = 0;
+ 	}
+ 	return ret;
+ }
+@@ -3353,7 +3353,7 @@
+ 		.be_hw_params_fixup = msm_be_hw_params_fixup,
+ 		.ignore_suspend = 1,
+ 	},
+-	/* Incall Music 2 BACK END DAI Link */	
++	/* Incall Music 2 BACK END DAI Link */
+ 	{
+ 		.name = LPASS_BE_VOICE2_PLAYBACK_TX,
+ 		.stream_name = "Voice2 Farend Playback",
+@@ -3404,7 +3404,7 @@
+ 		.be_hw_params_fixup = msm8974_mi2s_be_hw_params_fixup,
+ 		.ops = &msm8974_mi2s_be_ops,
+ 	},
+-#endif	
++#endif
+ #endif
+ };
+ 
+diff -Nur -X dontdiff a/sound/soc/msm/msm-lowlatency-pcm-q6.c b/sound/soc/msm/msm-lowlatency-pcm-q6.c
+--- a/sound/soc/msm/msm-lowlatency-pcm-q6.c	2016-01-24 04:27:36.953492000 -0500
++++ b/sound/soc/msm/msm-lowlatency-pcm-q6.c	2016-03-24 06:18:58.000000000 -0400
+@@ -50,10 +44,10 @@
+ 	unsigned volume;
+ };
+ 
+-#define PLAYBACK_NUM_PERIODS		2
+-#define PLAYBACK_MAX_PERIOD_SIZE	4096
+-#define PLAYBACK_MIN_PERIOD_SIZE	128
+-#define CAPTURE_NUM_PERIODS		2
++#define PLAYBACK_NUM_PERIODS		4
++#define PLAYBACK_MAX_PERIOD_SIZE	1024
++#define PLAYBACK_MIN_PERIOD_SIZE	128
++#define CAPTURE_NUM_PERIODS		4
+ #define CAPTURE_MIN_PERIOD_SIZE		128
+ #define CAPTURE_MAX_PERIOD_SIZE		1024
+ 
+diff -Nur -X dontdiff a/sound/soc/msm/msm-pcm-loopback.c b/sound/soc/msm/msm-pcm-loopback.c
+--- a/sound/soc/msm/msm-pcm-loopback.c	2016-01-24 04:27:36.790474000 -0500
++++ b/sound/soc/msm/msm-pcm-loopback.c	2016-03-24 06:18:58.000000000 -0400
+@@ -209,13 +209,13 @@
+ 
+ 	if (pcm->playback_substream != NULL) {
+ 		soc_pcm_rx = pcm->playback_substream->private_data;
+-	msm_pcm_routing_dereg_phy_stream(soc_pcm_rx->dai_link->be_id,
+-			SNDRV_PCM_STREAM_PLAYBACK);
++		msm_pcm_routing_dereg_phy_stream(soc_pcm_rx->dai_link->be_id,
++				SNDRV_PCM_STREAM_PLAYBACK);
+ 	}
+ 	if (pcm->capture_substream != NULL) {
+ 		soc_pcm_tx = pcm->capture_substream->private_data;
+-	msm_pcm_routing_dereg_phy_stream(soc_pcm_tx->dai_link->be_id,
+-			SNDRV_PCM_STREAM_CAPTURE);
++		msm_pcm_routing_dereg_phy_stream(soc_pcm_tx->dai_link->be_id,
++				SNDRV_PCM_STREAM_CAPTURE);
+ 	}
+ 	q6asm_audio_client_free(pcm->audio_client);
+ 	pcm->audio_client = NULL;
+diff -Nur -X dontdiff a/sound/soc/msm/qdsp6v2/audio_ocmem.c b/sound/soc/msm/qdsp6v2/audio_ocmem.c
+--- a/sound/soc/msm/qdsp6v2/audio_ocmem.c	2016-01-24 04:27:36.792474000 -0500
++++ b/sound/soc/msm/qdsp6v2/audio_ocmem.c	2016-03-24 06:18:58.000000000 -0400
+@@ -362,59 +362,65 @@
+ 		case OCMEM_STATE_SHRINK:
+ 			pr_debug("%s: ocmem shrink request process\n",
+ 							__func__);
+-			atomic_set(&audio_ocmem_lcl.audio_cond, 1);
+-			clear_bit_pos(audio_ocmem_lcl.audio_state,
+-					OCMEM_STATE_MAP_COMPL);
+-			set_bit_pos(audio_ocmem_lcl.audio_state,
+-					OCMEM_STATE_UNMAP_TRANSITION);
+-			ret = ocmem_unmap(cid, audio_ocmem_lcl.buf,
+-					&audio_ocmem_lcl.mlist);
+-			if (ret) {
+-				pr_err("%s: ocmem_unmap failed, state[%d]\n",
+-				__func__,
+-				atomic_read(&audio_ocmem_lcl.audio_state));
+-				goto fail_cmd1;
+-			}
++			if (test_bit_pos(audio_ocmem_lcl.audio_state,
++						OCMEM_STATE_MAP_COMPL)) {
++				atomic_set(&audio_ocmem_lcl.audio_cond, 1);
++				clear_bit_pos(audio_ocmem_lcl.audio_state,
++						OCMEM_STATE_MAP_COMPL);
++				set_bit_pos(audio_ocmem_lcl.audio_state,
++						OCMEM_STATE_UNMAP_TRANSITION);
++				ret = ocmem_unmap(cid, audio_ocmem_lcl.buf,
++						&audio_ocmem_lcl.mlist);
++				if (ret) {
++					pr_err("%s: ocmem_unmap failed, state[%d]\n",
++					__func__,
++					atomic_read(&audio_ocmem_lcl.audio_state));
++					goto fail_cmd1;
++				}
+ 
+-			wait_event_interruptible(audio_ocmem_lcl.audio_wait,
+-				(atomic_read(&audio_ocmem_lcl.audio_state) &
+-					     _UNMAP_RESPONSE_BIT_MASK_)
+-					     != 0);
+-			ret = ocmem_shrink(cid, audio_ocmem_lcl.buf, 0);
+-			if (ret) {
+-				pr_err("%s: ocmem_shrink failed, state[%d]\n",
+-				__func__,
+-				atomic_read(&audio_ocmem_lcl.audio_state));
+-				goto fail_cmd1;
+-			}
+-			atomic_set(&audio_ocmem_lcl.audio_cond, 1);
+-			clear_bit_pos(audio_ocmem_lcl.audio_state,
++				wait_event_interruptible(audio_ocmem_lcl.audio_wait,
++					(atomic_read(&audio_ocmem_lcl.audio_state) &
++						     _UNMAP_RESPONSE_BIT_MASK_)
++						     != 0);
++				ret = ocmem_shrink(cid, audio_ocmem_lcl.buf, 0);
++				if (ret) {
++					pr_err("%s: ocmem_shrink failed, state[%d]\n",
++					__func__,
++					atomic_read(&audio_ocmem_lcl.audio_state));
++					goto fail_cmd1;
++				}
++				atomic_set(&audio_ocmem_lcl.audio_cond, 1);
++				clear_bit_pos(audio_ocmem_lcl.audio_state,
+ 					OCMEM_STATE_SHRINK);
++                        }
+ 			pr_debug("%s:shrink process complete\n", __func__);
+ 			break;
+ 		case OCMEM_STATE_GROW:
+ 			pr_debug("%s: ocmem grow request process\n",
+ 							__func__);
+-			atomic_set(&audio_ocmem_lcl.audio_cond, 1);
+-			clear_bit_pos(audio_ocmem_lcl.audio_state,
+-					OCMEM_STATE_UNMAP_COMPL);
+-			set_bit_pos(audio_ocmem_lcl.audio_state,
+-					OCMEM_STATE_MAP_TRANSITION);
+-			ret = ocmem_map(cid, audio_ocmem_lcl.buf,
++			if (test_bit_pos(audio_ocmem_lcl.audio_state,
++						OCMEM_STATE_UNMAP_COMPL)) {
++				atomic_set(&audio_ocmem_lcl.audio_cond, 1);
++				clear_bit_pos(audio_ocmem_lcl.audio_state,
++						OCMEM_STATE_UNMAP_COMPL);
++				set_bit_pos(audio_ocmem_lcl.audio_state,
++						OCMEM_STATE_MAP_TRANSITION);
++				ret = ocmem_map(cid, audio_ocmem_lcl.buf,
+ 						&audio_ocmem_lcl.mlist);
+-			if (ret) {
+-				pr_err("%s: ocmem_map failed, state[%d]\n",
+-				__func__,
+-				atomic_read(&audio_ocmem_lcl.audio_state));
+-				goto fail_cmd1;
+-			}
+-			wait_event_interruptible(audio_ocmem_lcl.audio_wait,
+-				(atomic_read(&audio_ocmem_lcl.audio_state) &
+-						_MAP_RESPONSE_BIT_MASK_) != 0);
++				if (ret) {
++					pr_err("%s: ocmem_map failed, state[%d]\n",
++					__func__,
++					atomic_read(&audio_ocmem_lcl.audio_state));
++					goto fail_cmd1;
++				}
++				wait_event_interruptible(audio_ocmem_lcl.audio_wait,
++					(atomic_read(&audio_ocmem_lcl.audio_state) &
++							_MAP_RESPONSE_BIT_MASK_) != 0);
+ 
+-			clear_bit_pos(audio_ocmem_lcl.audio_state,
+-					OCMEM_STATE_GROW);
+-			atomic_set(&audio_ocmem_lcl.audio_cond, 1);
++				clear_bit_pos(audio_ocmem_lcl.audio_state,
++						OCMEM_STATE_GROW);
++				atomic_set(&audio_ocmem_lcl.audio_cond, 1);
++			}
+ 			break;
+ 		case OCMEM_STATE_EXIT:
+ 			if (test_bit_pos(audio_ocmem_lcl.audio_state,
+diff -Nur -X dontdiff a/sound/soc/msm/qdsp6v2/msm-compress-q6-v2.c b/sound/soc/msm/qdsp6v2/msm-compress-q6-v2.c
+--- a/sound/soc/msm/qdsp6v2/msm-compress-q6-v2.c	2016-01-24 04:27:36.794474000 -0500
++++ b/sound/soc/msm/qdsp6v2/msm-compress-q6-v2.c	2016-03-24 06:18:58.000000000 -0400
+@@ -1460,7 +1460,7 @@
+ 			if (atomic_read(&prtd->error))
+ 				return -ENETRESET;
+ 			else
+-			return -EAGAIN;
++				return -EAGAIN;
+ 		}
+ 	} else {
+ 		timestamp = prtd->marker_timestamp;
+diff -Nur -X dontdiff a/sound/soc/msm/qdsp6v2/msm-pcm-routing-v2.c b/sound/soc/msm/qdsp6v2/msm-pcm-routing-v2.c
+--- a/sound/soc/msm/qdsp6v2/msm-pcm-routing-v2.c	2016-01-24 04:27:36.797474000 -0500
++++ b/sound/soc/msm/qdsp6v2/msm-pcm-routing-v2.c	2016-03-24 06:18:58.000000000 -0400
+@@ -1457,6 +1457,12 @@
+ 	return 0;
+ }
+ 
++static int msm_sec_msp_get(struct snd_kcontrol *kcontrol,
++			struct snd_ctl_elem_value *ucontrol)
++{
++	return 0;
++}
++
+ static int msm_sec_sa_put(struct snd_kcontrol *kcontrol,
+ 			struct snd_ctl_elem_value *ucontrol)
+ {
+@@ -1518,6 +1524,18 @@
+ 	return ret;	
+ }
+ 
++static int msm_sec_msp_put(struct snd_kcontrol *kcontrol,
++			struct snd_ctl_elem_value *ucontrol)
++{
++	int ret = 0;
++	struct audio_client *ac;
++	mutex_lock(&routing_lock);
++	ac = q6asm_get_audio_client(fe_dai_map[3][SESSION_TYPE_RX].strm_id);
++	ret = q6asm_set_msp(ac, (long*)ucontrol->value.integer.value);
++	mutex_unlock(&routing_lock);	
++	return ret;
++}
++
+ static int msm_routing_ec_ref_rx_get(struct snd_kcontrol *kcontrol,
+ 				struct snd_ctl_elem_value *ucontrol)
+ {
+@@ -3443,6 +3461,8 @@
+ 				msm_sec_lrsm_get, msm_sec_lrsm_put),
+ 	SOC_SINGLE_MULTI_EXT("SA_EP data", SND_SOC_NOPM, 0, 65535, 0, 2,
+ 				msm_sec_sa_ep_get, msm_sec_sa_ep_put),
++	SOC_SINGLE_MULTI_EXT("MSP data", SND_SOC_NOPM, 0, 65535, 0, 1,
++				msm_sec_msp_get, msm_sec_msp_put),
+ };
+ 
+ static const struct snd_soc_dapm_widget msm_qdsp6_widgets[] = {
+diff -Nur -X dontdiff a/sound/soc/msm/qdsp6v2/msm-pcm-voip-v2.c b/sound/soc/msm/qdsp6v2/msm-pcm-voip-v2.c
+--- a/sound/soc/msm/qdsp6v2/msm-pcm-voip-v2.c	2016-01-24 04:27:36.798475000 -0500
++++ b/sound/soc/msm/qdsp6v2/msm-pcm-voip-v2.c	2016-03-24 06:18:58.000000000 -0400
+@@ -1,4 +1,4 @@
+-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
++/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License version 2 and
+@@ -494,7 +494,11 @@
+ 		pr_debug("%s: pkt_len =%d, frame.pktlen=%d, timestamp=%d\n",
+ 			 __func__, pkt_len, buf_node->frame.pktlen, timestamp);
+ 
+-		prtd->pcm_capture_irq_pos += prtd->pcm_capture_count;
++		if (prtd->mode == MODE_PCM)
++			prtd->pcm_capture_irq_pos += buf_node->frame.pktlen;
++		else
++			prtd->pcm_capture_irq_pos += prtd->pcm_capture_count;
++
+ 		spin_unlock_irqrestore(&prtd->dsp_ul_lock, dsp_flags);
+ 		snd_pcm_period_elapsed(prtd->capture_substream);
+ 	} else {
+@@ -655,7 +659,11 @@
+ 		}
+ 		pr_debug("%s: frame.pktlen=%d\n", __func__, buf_node->frame.pktlen);
+ 
+-		prtd->pcm_playback_irq_pos += prtd->pcm_count;
++		if (prtd->mode == MODE_PCM)
++			prtd->pcm_playback_irq_pos += buf_node->frame.pktlen;
++		else
++			prtd->pcm_playback_irq_pos += prtd->pcm_count;
++
+ 		spin_unlock_irqrestore(&prtd->dsp_lock, dsp_flags);
+ 		snd_pcm_period_elapsed(prtd->playback_substream);
+ 	} else {
+diff -Nur -X dontdiff a/sound/soc/msm/qdsp6v2/q6afe.c b/sound/soc/msm/qdsp6v2/q6afe.c
+--- a/sound/soc/msm/qdsp6v2/q6afe.c	2016-01-24 04:27:36.799475000 -0500
++++ b/sound/soc/msm/qdsp6v2/q6afe.c	2016-03-24 06:18:58.000000000 -0400
+@@ -615,7 +615,7 @@
+ 		pr_err("%s invalid port %d", __func__, port);
+ 		goto fail_cmd;
+ 	}
+-	
++
+ 	index = q6audio_get_port_index(port);
+ 	switch (param_id) {
+ 	case AFE_PARAM_ID_FBSP_MODE_RX_CFG:
+@@ -2999,6 +2999,15 @@
+ 		goto fail_cmd;
+ 	}
+ 	pr_debug("%s: port_id=%d\n", __func__, port_id);
++#if defined(CONFIG_SND_SOC_MAXIM_DSM) && defined(CONFIG_SND_SOC_MAX98506)
++	if (maxdsm_get_spk_state()) {
++		if (port_id == AFE_PORT_ID_SLIMBUS_MULTI_CHAN_0_RX) {
++			maxdsm_set_pilot_signal_state(0);
++			pr_info("%s: pilot signal state done %d\n",
++				__func__, port_id);
++		}
++	}
++#endif
+ 	if ((port_id == RT_PROXY_DAI_001_RX) ||
+ 			(port_id == RT_PROXY_DAI_002_TX)) {
+ 		pr_debug("%s: before decrementing pcm_afe_instance %d\n",
+@@ -3326,7 +3335,7 @@
+ 
+ 	pr_info("%s: port_id = 0x%x, module_id = 0x%x\n",
+ 		__func__, q6audio_get_port_id(port), maxdsm_get_rx_mod_id());
+-
++	
+ 	if (!calib_resp) {
+ 		pr_err("%s Invalid params\n", __func__);
+ 		goto fail_cmd;
+@@ -3486,7 +3495,7 @@
+ 				maxdsm->param[idx - 2], maxdsm->param[idx - 1],
+ 				*(p+i));
+ #endif /* USE_DSM_DEBUG */
+-			}
++	}
+ 
+ 	return idx;
+ }
+@@ -3507,8 +3516,8 @@
+ 		break;
+ 	default:
+ 		param_size = -EINVAL;
+-	      break;
+-		}
++		break;
++	}
+ 
+ #ifdef USE_DSM_DEBUG
+ 	pr_info("%s: param_size: %d, version: %d\n",
+@@ -3521,7 +3530,7 @@
+ int32_t dsm_open(void *data)
+ {
+ 	struct afe_dsm_spkr_prot_get_vi_calib calib_resp;
+-      struct afe_dsm_filter_set_params_t filter_params;
++	struct afe_dsm_filter_set_params_t filter_params;
+ 
+ 	struct maxim_dsm *maxdsm = (struct maxim_dsm*)data;
+ 	uint32_t dsm_params = maxdsm->filter_set;
+@@ -3534,7 +3543,7 @@
+ 		if (afe_dsm_spk_prot_get_calib_data(&calib_resp)) {
+ 			ret = -EINVAL;
+ 			break;
+-     }
++		}
+ 		if (maxdsm->param && maxdsm->binfo) {
+ 			dsm_get_afe_params(
+ 					&calib_resp.res_cfg.dcResistance,
+@@ -3554,8 +3563,8 @@
+ 	case DSM_ID_FILTER_SET_AFE_CNTRLS:
+ 		if (!maxdsm->param || !maxdsm->binfo) {
+ 			ret = -EINVAL;
+-       break;
+-    }
++			break;
++		}
+ 		dsm_set_afe_params(
+ 				&filter_params.dcResistance,
+ 				(int)(dsm_get_param_size(version) >> 1),
+@@ -3564,7 +3573,7 @@
+ 		ret = afe_dsm_spk_prot_feed_back_cfg(maxdsm_get_port_id(),
+ 				&filter_params);
+ 		break;
+-  }
++	}
+ 	pr_info("%s: ret=%d\n", __func__, ret);
+ 
+ 	return ret;
+diff -Nur -X dontdiff a/sound/soc/msm/qdsp6v2/q6asm.c b/sound/soc/msm/qdsp6v2/q6asm.c
+--- a/sound/soc/msm/qdsp6v2/q6asm.c	2016-01-24 04:27:36.800475000 -0500
++++ b/sound/soc/msm/qdsp6v2/q6asm.c	2016-03-24 06:18:58.000000000 -0400
+@@ -1285,12 +1285,12 @@
+ 	if (data->opcode == RESET_EVENTS) {
+ 		atomic_set(&ac->reset, 1);
+ 		if (ac->apr == NULL)
+-		    ac->apr = ac->apr2;
++			ac->apr = ac->apr2;
+ 		pr_debug("q6asm_callback: Reset event is received: %d %d apr[%p]\n",
+ 				data->reset_event, data->reset_proc, ac->apr);
+-			if (ac->cb)
+-				ac->cb(data->opcode, data->token,
+-					(uint32_t *)data->payload, ac->priv);
++		if (ac->cb)
++			ac->cb(data->opcode, data->token,
++				(uint32_t *)data->payload, ac->priv);
+ 		apr_reset(ac->apr);
+ 		ac->apr = NULL;
+ 		atomic_set(&ac->time_flag, 0);
+@@ -3869,6 +3869,46 @@
+ 	rc = apr_send_pkt(ac->apr, (uint32_t *)&cmd);
+ 	if (rc < 0) {
+ 		rc = -EINVAL;
++		goto fail_cmd;
++	}
++
++fail_cmd:
++	return rc;
++}
++
++
++int q6asm_set_msp(struct audio_client *ac, long *param)
++{
++	int sz = 0;
++	int rc  = 0;
++	struct asm_stream_cmd_set_pp_params_msp cmd;
++
++	if(ac == NULL) {
++		pr_err("%s: audio client is null\n", __func__);
++		return -1;
++	}
++
++	sz = sizeof(struct asm_stream_cmd_set_pp_params_msp);
++	q6asm_add_hdr_async(ac, &cmd.hdr, sz, TRUE);
++
++	cmd.hdr.opcode = ASM_STREAM_CMD_SET_PP_PARAMS_V2;
++	cmd.param.data_payload_addr_lsw = 0;
++	cmd.param.data_payload_addr_msw = 0;
++	cmd.param.mem_map_handle = 0;
++	cmd.param.data_payload_size =
++			sizeof(cmd) - sizeof(cmd.hdr) - sizeof(cmd.param);
++	cmd.data.module_id = ASM_MODULE_ID_PP_SA_MSP;
++	cmd.data.param_id = ASM_MODULE_ID_PP_SA_MSP_PARAM;
++	cmd.data.param_size = cmd.param.data_payload_size - sizeof(cmd.data);
++	cmd.data.reserved = 0;
++
++	/* VSP paramerters */
++	cmd.msp_int = param[0];
++	pr_info("%s: %d\n", __func__, cmd.msp_int);
++
++	rc = apr_send_pkt(ac->apr, (uint32_t *)&cmd);
++	if (rc < 0) {
++		rc = -EINVAL;
+ 		goto fail_cmd;
+ 	}
+ 
+diff -Nur -X dontdiff a/sound/soc/msm/qdsp6v2/rtac.c b/sound/soc/msm/qdsp6v2/rtac.c
+--- a/sound/soc/msm/qdsp6v2/rtac.c	2016-01-24 04:27:36.803475000 -0500
++++ b/sound/soc/msm/qdsp6v2/rtac.c	2016-03-24 06:18:58.000000000 -0400
+@@ -1,4 +1,4 @@
+-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
++/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License version 2 and
+@@ -487,7 +487,7 @@
+ 
+ 	/* look for device */
+ 	for (i = 0; i < rtac_adm_data_v2.num_of_dev; i++) {
+-		if (rtac_adm_data_v2.device[i].afe_port == port_id) {
++		if (rtac_adm_data_v2.device[i].afe_port == port_id && rtac_adm_data_v2.device[i].num_of_popp == 0) {
+ 			memset(&rtac_adm_data_v2.device[i], 0,
+ 				   sizeof(rtac_adm_data_v2.device[i]));
+ 			rtac_adm_data_v2.num_of_dev--;
+@@ -971,17 +971,16 @@
+ 	result = wait_event_timeout(rtac_adm_apr_data.cmd_wait,
+ 		(atomic_read(&rtac_adm_apr_data.cmd_state) == 0),
+ 		msecs_to_jiffies(TIMEOUT_MS));
+-	mutex_unlock(&rtac_adm_apr_mutex);
+ 	if (!result) {
+-		pr_err("%s: Set params timed out port = %d, copp = %d\n",
+-			__func__, port_index, copp_id);
+-		goto done;
++		pr_err("%s: Set params timed out copp = %d\n", __func__,
++			copp_id);
++		goto err;
+ 	}
+ 	if (atomic_read(&rtac_common.apr_err_code)) {
+ 		pr_err("%s: DSP returned error code = %d, opcode = 0x%x\n",
+ 			__func__, atomic_read(&rtac_common.apr_err_code),
+ 			opcode);
+-		goto done;
++		goto err;
+ 	}
+ 
+ 	if (opcode == ADM_CMD_GET_PP_PARAMS_V5) {
+@@ -991,7 +990,7 @@
+ 		if (bytes_returned > user_buf_size) {
+ 			pr_err("%s: User buf not big enough, size = 0x%x, returned size = 0x%x\n",
+ 				__func__, user_buf_size, bytes_returned);
+-			goto done;
++			goto err;
+ 		}
+ 
+ 		if (copy_to_user(buf, (void *)
+@@ -999,16 +998,14 @@
+ 				bytes_returned)) {
+ 			pr_err("%s: Could not copy buffer to user,size = %d\n",
+ 				__func__, bytes_returned);
+-			goto done;
++			goto err;
+ 		}
+ 	} else {
+ 		bytes_returned = data_size;
+ 	}
+-
+-done:
+-	return bytes_returned;
+ err:
+ 	mutex_unlock(&rtac_adm_apr_mutex);
++done:
+ 	return bytes_returned;
+ }
+ 
+@@ -1180,17 +1177,16 @@
+ 	result = wait_event_timeout(rtac_asm_apr_data[session_id].cmd_wait,
+ 		(atomic_read(&rtac_asm_apr_data[session_id].cmd_state) == 0),
+ 		5 * HZ);
+-	mutex_unlock(&rtac_asm_apr_mutex);
+ 	if (!result) {
+ 		pr_err("%s: Set params timed out session = %d\n",
+ 			__func__, session_id);
+-		goto done;
++		goto err;
+ 	}
+ 	if (atomic_read(&rtac_common.apr_err_code)) {
+ 		pr_err("%s: DSP returned error code = %d, opcode = 0x%x\n",
+ 			__func__, atomic_read(&rtac_common.apr_err_code),
+ 			opcode);
+-		goto done;
++		goto err;
+ 	}
+ 
+ 	if (opcode == ASM_STREAM_CMD_GET_PP_PARAMS_V2) {
+@@ -1200,7 +1196,7 @@
+ 		if (bytes_returned > user_buf_size) {
+ 			pr_err("%s: User buf not big enough, size = 0x%x, returned size = 0x%x\n",
+ 				__func__, user_buf_size, bytes_returned);
+-			goto done;
++			goto err;
+ 		}
+ 
+ 		if (copy_to_user(buf, (void *)
+@@ -1208,19 +1204,17 @@
+ 				bytes_returned)) {
+ 			pr_err("%s: Could not copy buffer to user,size = %d\n",
+ 				 __func__, bytes_returned);
+-			goto done;
++			goto err;
+ 		}
+ 	} else {
+ 		bytes_returned = data_size;
+ 	}
+-done:
+-	return bytes_returned;
+ err:
+ 	mutex_unlock(&rtac_asm_apr_mutex);
++done:
+ 	return bytes_returned;
+ }
+ 
+-
+ /* Voice APR */
+ void rtac_set_voice_handle(u32 mode, void *handle)
+ {
+@@ -1388,17 +1382,16 @@
+ 	result = wait_event_timeout(rtac_voice_apr_data[mode].cmd_wait,
+ 		(atomic_read(&rtac_voice_apr_data[mode].cmd_state) == 0),
+ 		msecs_to_jiffies(TIMEOUT_MS));
+-	mutex_unlock(&rtac_voice_apr_mutex);
+ 	if (!result) {
+ 		pr_err("%s: apr_send_pkt timed out opcode = %x\n",
+ 			__func__, opcode);
+-		goto done;
++		goto err;
+ 	}
+ 	if (atomic_read(&rtac_common.apr_err_code)) {
+ 		pr_err("%s: DSP returned error code = %d, opcode = 0x%x\n",
+ 			__func__, atomic_read(&rtac_common.apr_err_code),
+ 			opcode);
+-		goto done;
++		goto err;
+ 	}
+ 
+ 	if (opcode == VOICE_CMD_GET_PARAM) {
+@@ -1408,7 +1401,7 @@
+ 		if (bytes_returned > user_buf_size) {
+ 			pr_err("%s: User buf not big enough, size = 0x%x, returned size = 0x%x\n",
+ 				__func__, user_buf_size, bytes_returned);
+-			goto done;
++			goto err;
+ 		}
+ 
+ 		if (copy_to_user(buf, (void *)
+@@ -1416,15 +1409,14 @@
+ 				bytes_returned)) {
+ 			pr_err("%s: Could not copy buffer to user, size = %d\n",
+ 				 __func__, bytes_returned);
+-			goto done;
++			goto err;
+ 		}
+ 	} else {
+ 		bytes_returned = data_size;
+ 	}
+-done:
+-	return bytes_returned;
+ err:
+ 	mutex_unlock(&rtac_voice_apr_mutex);
++done:
+ 	return bytes_returned;
+ }
+ 
+diff -Nur -X dontdiff a/sound/soc/soc-pcm.c b/sound/soc/soc-pcm.c
+--- a/sound/soc/soc-pcm.c	2016-01-24 04:27:36.805475000 -0500
++++ b/sound/soc/soc-pcm.c	2016-03-24 06:18:58.000000000 -0400
+@@ -580,8 +580,8 @@
+ 	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
+ 		if (codec_dai->capture_active == 1)
+ 			snd_soc_dapm_stream_event(rtd,
+-					  codec_dai->driver->capture.stream_name,
+-					  SND_SOC_DAPM_STREAM_START);
++			codec_dai->driver->capture.stream_name,
++			SND_SOC_DAPM_STREAM_START);
+ 	}
+ 	snd_soc_dai_digital_mute(codec_dai, 0);
+ 
+

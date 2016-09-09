@@ -1,0 +1,5306 @@
+diff -X dontdiff -Nuarb a/drivers/sensors/ak09911c.c b/drivers/sensors/ak09911c.c
+--- a/drivers/sensors/ak09911c.c	2016-01-06 15:00:43.076590571 -0500
++++ b/drivers/sensors/ak09911c.c	2015-12-01 05:56:51.000000000 -0500
+@@ -80,6 +80,7 @@
+ 	u8 asa[3];
+ 	u32 chip_pos;
+ 	int m_rst_n;
++	u64 ts_old;
+ };
+ 
+ static int ak09911c_i2c_read(struct i2c_client *client,
+@@ -136,7 +137,7 @@
+ static int ak09911c_i2c_read_block(struct i2c_client *client,
+ 		unsigned char reg_addr, unsigned char *buf, unsigned char len)
+ {
+-#if defined(CONFIG_SEC_BERLUTI_PROJECT)
++#if 1
+ 	int ret;
+ 	struct i2c_msg msg[2];
+ 
+@@ -233,13 +234,14 @@
+ 	/* Check ST bit */
+ 	if (!(temp[0] & 0x01)) {
+ 		if ((retries++ < 5) && (temp[0] == 0)) {
+-#if !defined(CONFIG_SEC_BERLUTI_PROJECT)
+-			mdelay(2);
+-#endif
+ 			goto again;
+ 		} else {
+-			ret = -EAGAIN;
+-			goto exit_i2c_read_fail;
++			// If data is not ready to read, store previous data to avoid event gap
++			mag->x = data->magdata.x;
++			mag->y = data->magdata.y;
++			mag->z = data->magdata.z;
++			ret = 0;
++			goto exit;
+ 		}
+ 	}
+ 
+@@ -251,7 +253,7 @@
+ 	/* Check ST2 bit */
+ 	if ((temp[8] & 0x08)) {
+ 		ret = -EAGAIN;
+-		goto exit_i2c_read_fail;
++		goto exit_i2c_read_err;
+ 	}
+ #endif
+ 	mag->x = temp[1] | (temp[2] << 8);
+@@ -262,7 +264,6 @@
+ 
+ 	goto exit;
+ 
+-exit_i2c_read_fail:
+ exit_i2c_read_err:
+ 	pr_err("[SENSOR]: %s - ST1 = %u, ST2 = %u\n",
+ 		__func__, temp[0], temp[8]);
+@@ -275,20 +276,60 @@
+ {
+ 	int ret;
+ 	struct ak09911c_v mag;
++	int time_hi, time_lo;
++	struct timespec time_spec;
++	u64 ts_new, ts_shift, ts;
++	unsigned long delay;
+ 	struct ak09911c_p *data = container_of((struct delayed_work *)work,
+ 			struct ak09911c_p, work);
+-	unsigned long delay = nsecs_to_jiffies(atomic_read(&data->delay));
++
++	delay = atomic_read(&data->delay);
++	time_spec = ktime_to_timespec(alarm_get_elapsed_realtime());
++	ts_new = time_spec.tv_sec * 1000000000ULL + time_spec.tv_nsec;
++	ts_shift = delay >> 1;
++	ts = 0ULL;
+ 
+ 	ret = ak09911c_read_mag_xyz(data, &mag);
+-	if (ret >= 0) {
++	if (ret < 0)
++		return;
++
++	data->magdata = mag;
++
++	mag.x = (mag.x >= 0) ? (mag.x + 1) : (mag.x - 1);
++	mag.y = (mag.y >= 0) ? (mag.y + 1) : (mag.y - 1);
++	mag.z = (mag.z >= 0) ? (mag.z + 1) : (mag.z - 1);
++
++	if (data->ts_old != 0 && ((ts_new - data->ts_old) * 10 > delay * 18)) {
++		for (ts = data->ts_old + delay; ts < ts_new - ts_shift; ts += delay) {
++			time_hi = (int)((ts & TIME_HI_MASK) >> TIME_HI_SHIFT);
++			time_lo = (int)(ts & TIME_LO_MASK);
++			time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++			time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
+ 		input_report_rel(data->input, REL_X, mag.x);
+ 		input_report_rel(data->input, REL_Y, mag.y);
+ 		input_report_rel(data->input, REL_Z, mag.z);
++			input_report_rel(data->input, REL_RX, time_hi);
++			input_report_rel(data->input, REL_RY, time_lo);
+ 		input_sync(data->input);
+-		data->magdata = mag;
++			data->ts_old = ts;
++		}
+ 	}
+ 
+-	schedule_delayed_work(&data->work, delay);
++	time_hi = (int)((ts_new & TIME_HI_MASK) >> TIME_HI_SHIFT);
++	time_lo = (int)(ts_new & TIME_LO_MASK);
++	time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++	time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
++	input_report_rel(data->input, REL_X, mag.x);
++	input_report_rel(data->input, REL_Y, mag.y);
++	input_report_rel(data->input, REL_Z, mag.z);
++	input_report_rel(data->input, REL_RX, time_hi);
++	input_report_rel(data->input, REL_RY, time_lo);
++	input_sync(data->input);
++	data->ts_old = ts_new;
++
++	schedule_delayed_work(&data->work, nsecs_to_jiffies(atomic_read(&data->delay)));
+ }
+ 
+ static void ak09911c_set_enable(struct ak09911c_p *data, int enable)
+@@ -297,6 +338,7 @@
+ 
+ 	if (enable) {
+ 		if (pre_enable == 0) {
++			data->ts_old = 0ULL;
+ 			ak09911c_ecs_set_mode(data, AK09911C_MODE_SNG_MEASURE);
+ 			schedule_delayed_work(&data->work,
+ 				nsecs_to_jiffies(atomic_read(&data->delay)));
+@@ -408,7 +450,7 @@
+ 
+ 	/* wait for data ready */
+ 	while (ready_count < 10) {
+-		msleep(20);
++		usleep_range(20000, 21000);
+ 		ret = ak09911c_i2c_read(data->client, AK09911C_REG_ST1, &reg);
+ 		if ((reg == 1) && (ret == 0))
+ 			break;
+@@ -529,7 +571,7 @@
+ 			break;
+ 		}
+ 
+-		msleep(20);
++		usleep_range(20000, 21000);
+ 		pr_err("[SENSOR]: %s - adc retries %d", __func__, retries);
+ 	}
+ 
+@@ -613,7 +655,7 @@
+ 
+ 	if (atomic_read(&data->enable) == 1) {
+ 		success = true;
+-		msleep(20);
++		usleep_range(20000, 21000);
+ 		goto exit;
+ 	}
+ 
+@@ -637,7 +679,7 @@
+ 	struct ak09911c_v mag = data->magdata;
+ 
+ 	if (atomic_read(&data->enable) == 1) {
+-		msleep(20);
++		usleep_range(20000, 21000);
+ 		goto exit;
+ 	}
+ 
+@@ -786,6 +828,8 @@
+ 	input_set_capability(dev, EV_REL, REL_X);
+ 	input_set_capability(dev, EV_REL, REL_Y);
+ 	input_set_capability(dev, EV_REL, REL_Z);
++	input_set_capability(dev, EV_REL, REL_RX); /* time_hi */
++	input_set_capability(dev, EV_REL, REL_RY); /* time_lo */
+ 	input_set_drvdata(dev, data);
+ 
+ 	ret = input_register_device(dev);
+diff -X dontdiff -Nuarb a/drivers/sensors/ak8963c.c b/drivers/sensors/ak8963c.c
+--- a/drivers/sensors/ak8963c.c	2016-01-06 15:00:43.076590571 -0500
++++ b/drivers/sensors/ak8963c.c	2015-12-01 05:56:46.000000000 -0500
+@@ -81,6 +81,7 @@
+ 	int irq;
+ 	int m_rst_n;
+ 	int m_sensor_int;
++	u64 ts_old;
+ };
+ 
+ static int ak8963c_i2c_read(struct i2c_client *client,
+@@ -251,12 +252,21 @@
+ 
+ 	ret = ak8963c_wait_for_data_ready(data);
+ 	if (ret) {
++		// If data is not ready to read, store previous data to avoid event gap
++		mag->x = data->magdata.x;
++		mag->y = data->magdata.y;
++		mag->z = data->magdata.z;
+ 		mutex_unlock(&data->lock);
+-		return ret;
++		return 0;
+ 	}
+ 
+ 	ret = ak8963c_i2c_read_block(data->client, AK8963C_REG_ST1,
+ 			temp, SENSOR_DATA_SIZE);
++	if (ret < 0) {
++		mutex_unlock(&data->lock);
++		return ret;
++	}
++
+ 	mutex_unlock(&data->lock);
+ 
+ 	mag->x = temp[1] | (temp[2] << 8);
+@@ -270,19 +280,62 @@
+ 
+ static void ak8963c_work_func(struct work_struct *work)
+ {
++	int ret;
+ 	struct ak8963c_v mag;
++	int time_hi, time_lo;
++	struct timespec time_spec;
++	u64 ts_new, ts_shift, ts;
++	unsigned long delay;
+ 	struct ak8963c_p *data = container_of((struct delayed_work *)work,
+ 			struct ak8963c_p, work);
+-	unsigned long delay = nsecs_to_jiffies(atomic_read(&data->delay));
+ 
+-	ak8963c_read_mag_xyz(data, &mag);
++	delay = atomic_read(&data->delay);
++	time_spec = ktime_to_timespec(alarm_get_elapsed_realtime());
++	ts_new = time_spec.tv_sec * 1000000000ULL + time_spec.tv_nsec;
++	ts_shift = delay >> 1;
++	ts = 0ULL;
++
++	ret = ak8963c_read_mag_xyz(data, &mag);
++	if (ret < 0)
++		return;
++
++	data->magdata = mag;
++
++	mag.x = (mag.x >= 0) ? (mag.x + 1) : (mag.x - 1);
++	mag.y = (mag.y >= 0) ? (mag.y + 1) : (mag.y - 1);
++	mag.z = (mag.z >= 0) ? (mag.z + 1) : (mag.z - 1);
++
++	if (data->ts_old != 0 && ((ts_new - data->ts_old) * 10 > delay * 18)) {
++		for (ts = data->ts_old + delay; ts < ts_new - ts_shift; ts += delay) {
++			time_hi = (int)((ts & TIME_HI_MASK) >> TIME_HI_SHIFT);
++			time_lo = (int)(ts & TIME_LO_MASK);
++			time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++			time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
+ 	input_report_rel(data->input, REL_X, mag.x);
+ 	input_report_rel(data->input, REL_Y, mag.y);
+ 	input_report_rel(data->input, REL_Z, mag.z);
++			input_report_rel(data->input, REL_RX, time_hi);
++			input_report_rel(data->input, REL_RY, time_lo);
+ 	input_sync(data->input);
+-	data->magdata = mag;
++			data->ts_old = ts;
++		}
++	}
++
++	time_hi = (int)((ts_new & TIME_HI_MASK) >> TIME_HI_SHIFT);
++	time_lo = (int)(ts_new & TIME_LO_MASK);
++	time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++	time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
++	input_report_rel(data->input, REL_X, mag.x);
++	input_report_rel(data->input, REL_Y, mag.y);
++	input_report_rel(data->input, REL_Z, mag.z);
++	input_report_rel(data->input, REL_RX, time_hi);
++	input_report_rel(data->input, REL_RY, time_lo);
++	input_sync(data->input);
++	data->ts_old = ts_new;
+ 
+-	schedule_delayed_work(&data->work, delay);
++	schedule_delayed_work(&data->work, nsecs_to_jiffies(atomic_read(&data->delay)));
+ }
+ 
+ static void ak8963c_set_enable(struct ak8963c_p *data, int enable)
+@@ -291,6 +344,7 @@
+ 
+ 	if (enable) {
+ 		if (pre_enable == 0) {
++			data->ts_old = 0ULL;
+ 			ak8963c_ecs_set_mode(data, AK8963C_CNTL1_SNG_MEASURE);
+ 			schedule_delayed_work(&data->work,
+ 				nsecs_to_jiffies(atomic_read(&data->delay)));
+@@ -404,7 +458,7 @@
+ 
+ 	/* wait for data ready */
+ 	while (ready_count < 10) {
+-		msleep(20);
++		usleep_range(20000, 21000);
+ 		ret = ak8963c_i2c_read(data->client, AK8963C_REG_ST1, &reg);
+ 		if ((reg == 1) && (ret == 0))
+ 			break;
+@@ -579,7 +633,7 @@
+ 		goto exit;
+ 	}
+ 
+-	msleep(20);
++	usleep_range(20000, 21000);
+ 
+ retry_adc:
+ 	mutex_lock(&data->lock);
+@@ -637,7 +691,7 @@
+ 	if (atomic_read(&data->enable) == 1)
+ 		goto exit;
+ 
+-	msleep(20);
++	usleep_range(20000, 21000);
+ 
+ retry_rawdata:
+ 	mutex_lock(&data->lock);
+@@ -822,6 +876,8 @@
+ 	input_set_capability(dev, EV_REL, REL_X);
+ 	input_set_capability(dev, EV_REL, REL_Y);
+ 	input_set_capability(dev, EV_REL, REL_Z);
++	input_set_capability(dev, EV_REL, REL_RX);
++	input_set_capability(dev, EV_REL, REL_RY);
+ 	input_set_drvdata(dev, data);
+ 
+ 	ret = input_register_device(dev);
+diff -Nuarb a/include/linux/alps_compass_io.h b/include/linux/alps_compass_io.h
+--- a/include/linux/alps_compass_io.h	2016-01-06 22:47:37.523090978 -0500
++++ b/include/linux/alps_compass_io.h	2015-12-01 05:57:37.000000000 -0500
+@@ -25,11 +25,21 @@
+ 
+ #define ALPSIO_SET_MAGACTIVATE   _IOW(ALPSIO, 0, int)
+ #define ALPSIO_SET_ACCACTIVATE   _IOW(ALPSIO, 1, int)
+-#define ALPSIO_SET_DELAY         _IOW(ALPSIO, 2, int)
++#define ALPSIO_SET_DELAY         _IOW(ALPSIO, 2, int64_t)
+ #define ALPSIO_ACT_SELF_TEST_A   _IOR(ALPSIO, 3, int)
+ #define ALPSIO_ACT_SELF_TEST_B   _IOR(ALPSIO, 4, int)
+ #define ALPSIO_REOPT_VAL         _IOW(ALPSIO, 5, int)
+ 
++enum {
++	SENSOR_NS_DELAY_FASTEST = 10000000,	/* 10msec */
++	SENSOR_NS_DELAY_NORMAL = 200000000,	/* 200msec */
++};
++
++enum {
++	SENSOR_MS_DELAY_FASTEST = 10,	/* 10msec */
++	SENSOR_MS_DELAY_NORMAL = 200,	/* 200msec */
++};
++
+ //extern int accsns_get_acceleration_data(int *xyz);
+ extern int hscd_get_magnetic_field_data(int *xyz);
+ extern void hscd_activate(int flgatm, int flg, int dtime);
+diff -X dontdiff -Nuarb a/drivers/sensors/alps-input.c b/drivers/sensors/alps-input.c
+--- a/drivers/sensors/alps-input.c	2016-01-06 15:00:43.076590571 -0500
++++ b/drivers/sensors/alps-input.c	2015-12-01 05:56:46.000000000 -0500
+@@ -9,7 +9,7 @@
+ #include <linux/miscdevice.h>
+ #include <linux/fs.h>
+ #include <linux/ioctl.h>
+-#include <linux/sensor/sensors_core.h>
++#include "sensors_core.h"
+ #ifdef CONFIG_OF
+ #include <linux/of_gpio.h>
+ #endif
+@@ -18,14 +18,17 @@
+ #endif
+ #include <linux/alps_compass_io.h>
+ #include <linux/input-polldev.h>
++#include <linux/math64.h>
+ 
+ #define EVENT_TYPE_ACCEL_X          ABS_X
+ #define EVENT_TYPE_ACCEL_Y          ABS_Y
+ #define EVENT_TYPE_ACCEL_Z          ABS_Z
+ 
+-#define EVENT_TYPE_MAG_X           ABS_X
+-#define EVENT_TYPE_MAG_Y           ABS_Y
+-#define EVENT_TYPE_MAG_Z           ABS_Z
++#define EVENT_TYPE_MAG_X           REL_X
++#define EVENT_TYPE_MAG_Y           REL_Y
++#define EVENT_TYPE_MAG_Z           REL_Z
++#define EVENT_TYPE_MAG_TIME_HI     REL_DIAL
++#define EVENT_TYPE_MAG_TIME_LO     REL_MISC
+ 
+ #define ALPS_POLL_INTERVAL   200    /* msecs */
+ #define ALPS_INPUT_FUZZ        0    /* input event threshold */
+@@ -52,12 +55,14 @@
+ 	int flgM;
+ 	int flgA;
+ 	u32 position;
++	u64 old_timestamp;
+ };
+ 
+ /* for I/O Control */
+ static long alps_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ {
+ 	int ret = -1, tmpval;
++	int64_t delay_ns;
+ 	void __user *argp = (void __user *)arg;
+ 	struct alps_data *data = container_of(filp->private_data,
+ 					     struct alps_data, alps_device);
+@@ -65,6 +70,8 @@
+ 	switch (cmd) {
+ 	case ALPSIO_SET_MAGACTIVATE:
+ 		ret = copy_from_user(&tmpval, argp, sizeof(tmpval));
++		if (tmpval && (tmpval != data->flgM))
++			data->old_timestamp = 0ULL;
+ 		if (ret) {
+ 			pr_err("%s : failed for ALPSIO_SET_MAGACTIVATE\n",
+ 				__func__);
+@@ -102,22 +109,18 @@
+ 		break;
+ */
+ 	case ALPSIO_SET_DELAY:
+-		ret = copy_from_user(&tmpval, argp, sizeof(tmpval));
++		ret = copy_from_user(&delay_ns, argp, sizeof(delay_ns));
+ 		if (ret) {
+ 			pr_err("%s : failed for ALPSIO_SET_DELAY\n", __func__);
+ 			return -EFAULT;
+ 		}
+ 
+ 		mutex_lock(&data->alps_lock);
+-		if (tmpval <= 10)
+-			tmpval = 10;
+-		else if (tmpval <= 20)
+-			tmpval = 20;
+-		else if (tmpval <=  70)
+-			tmpval =  70;
+-		else
+-			tmpval = 200;
+-		data->delay = tmpval;
++		data->delay = (int)div64_long(delay_ns, 1000000LL);
++		if (delay_ns >= SENSOR_NS_DELAY_NORMAL)
++			data->delay = SENSOR_MS_DELAY_NORMAL;
++		else if (delay_ns <= SENSOR_NS_DELAY_FASTEST)
++			data->delay = SENSOR_MS_DELAY_FASTEST;
+ 
+ 		if (data->flgM)
+ 			hscd_activate(1, data->flgM, data->delay);
+@@ -201,14 +204,42 @@
+ {
+ 	int xyz[3];
+ 	struct input_dev * idev = data->alps_idev->input;
++	int time_hi, time_lo;
++	struct timespec ts = ktime_to_timespec(alarm_get_elapsed_realtime());
++	u64 timestamp_new = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
++	u64 delay = data->delay * 1000000ULL;
++	u64 shift_timestamp = delay >> 1;
++	u64 timestamp = 0ULL;
+ 
+ 	if (hscd_get_magnetic_field_data(xyz) == 0) {
+ 		remap_sensor_data_32(xyz, data->position);
+-		input_report_abs(idev, EVENT_TYPE_MAG_X, xyz[0]);
+-		input_report_abs(idev, EVENT_TYPE_MAG_Y, xyz[1]);
+-		input_report_abs(idev, EVENT_TYPE_MAG_Z, xyz[2]);
++
++		if (data->old_timestamp != 0 && ((timestamp_new - data->old_timestamp) * 10 > delay * 18)) {
++			for (timestamp = data->old_timestamp + delay; timestamp < timestamp_new - shift_timestamp; timestamp += delay) {
++				time_hi = (int)((timestamp & TIME_HI_MASK) >> TIME_HI_SHIFT);
++				time_lo = (int)(timestamp & TIME_LO_MASK);
++				input_report_rel(idev, EVENT_TYPE_MAG_X, xyz[0]);
++				input_report_rel(idev, EVENT_TYPE_MAG_Y, xyz[1]);
++				input_report_rel(idev, EVENT_TYPE_MAG_Z, xyz[2]);
++				input_report_rel(idev, EVENT_TYPE_MAG_TIME_HI, time_hi);
++				input_report_rel(idev, EVENT_TYPE_MAG_TIME_LO, time_lo);
++				idev->sync = 0;
++				input_event(idev, EV_SYN, SYN_REPORT, 2);
++				data->old_timestamp = timestamp;
++			}
++		}
++
++		time_hi = (int)((timestamp_new & TIME_HI_MASK) >> TIME_HI_SHIFT);
++		time_lo = (int)(timestamp_new & TIME_LO_MASK);
++
++		input_report_rel(idev, EVENT_TYPE_MAG_X, xyz[0]);
++		input_report_rel(idev, EVENT_TYPE_MAG_Y, xyz[1]);
++		input_report_rel(idev, EVENT_TYPE_MAG_Z, xyz[2]);
++		input_report_rel(idev, EVENT_TYPE_MAG_TIME_HI, time_hi);
++		input_report_rel(idev, EVENT_TYPE_MAG_TIME_LO, time_lo);
+ 		idev->sync = 0;
+ 		input_event(idev, EV_SYN, SYN_REPORT, 2);
++		data->old_timestamp = timestamp_new;
+ 	}
+ }
+ 
+@@ -311,12 +342,11 @@
+ 			2048, 2047, ALPS_INPUT_FUZZ, ALPS_INPUT_FLAT);
+ 
+     /* 15-bit output (HSCDTD008A) */
+-	input_set_abs_params(idev, EVENT_TYPE_MAG_X,
+-			-16384, 16383, ALPS_INPUT_FUZZ, ALPS_INPUT_FLAT);
+-	input_set_abs_params(idev, EVENT_TYPE_MAG_Y,
+-			-16384, 16383, ALPS_INPUT_FUZZ, ALPS_INPUT_FLAT);
+-	input_set_abs_params(idev, EVENT_TYPE_MAG_Z,
+-			-16384, 16383, ALPS_INPUT_FUZZ, ALPS_INPUT_FLAT);
++	input_set_capability(idev, EV_REL, EVENT_TYPE_MAG_X);
++	input_set_capability(idev, EV_REL, EVENT_TYPE_MAG_Y);
++	input_set_capability(idev, EV_REL, EVENT_TYPE_MAG_Z);
++	input_set_capability(idev, EV_REL, EVENT_TYPE_MAG_TIME_HI);
++	input_set_capability(idev, EV_REL, EVENT_TYPE_MAG_TIME_LO);
+ 
+ 	ret = input_register_polled_device(data->alps_idev);
+ 	if (ret)
+diff -X dontdiff -Nuarb a/drivers/sensors/bma255.c b/drivers/sensors/bma255.c
+--- a/drivers/sensors/bma255.c	2016-01-06 15:00:43.076590571 -0500
++++ b/drivers/sensors/bma255.c	2015-12-01 05:56:51.000000000 -0500
+@@ -105,6 +105,7 @@
+ 	int sda_gpio;
+ 	int scl_gpio;
+ 	int time_count;
++	u64 ts_old;
+ };
+ 
+ static int bma255_open_calibration(struct bma255_p *);
+@@ -331,7 +332,7 @@
+ 		break;
+ 	}
+ 
+-	pr_info("[SENSOR]: %s - change mode %u\n", __func__, mode);
++	pr_info("[SENSOR]: %s - mode = %u, ret = %d\n", __func__, mode, ret);
+ 	mutex_unlock(&data->mode_mutex);
+ 
+ 	return ret;
+@@ -380,7 +381,7 @@
+ 	buf = BMA255_SET_BITSLICE(buf, BMA255_BANDWIDTH, bandwidth);
+ 	ret += bma255_i2c_write(data, BMA255_BANDWIDTH__REG, buf);
+ 
+-	pr_info("[SENSOR]: %s - change bandwidth %u\n", __func__, bandwidth);
++	pr_info("[SENSOR]: %s - bandwidth = %u, ret = %d\n", __func__, bandwidth, ret);
+ 	return ret;
+ }
+ 
+@@ -440,20 +441,60 @@
+ {
+ 	int ret;
+ 	struct bma255_v acc;
++	int time_hi, time_lo;
++	struct timespec time_spec;
++	u64 ts_new, ts_shift, ts;
++	unsigned long delay;
+ 	struct bma255_p *data = container_of(work, struct bma255_p, work);
+ 
++	delay = ktime_to_ns(data->poll_delay);
++	time_spec = ktime_to_timespec(alarm_get_elapsed_realtime());
++	ts_new = time_spec.tv_sec * 1000000000ULL + time_spec.tv_nsec;
++	ts_shift = delay >> 1;
++	ts = 0ULL;
++
+ 	ret = bma255_read_accel_xyz(data, &acc);
+ 	if (ret < 0)
+ 		goto exit;
+ 
+-	data->accdata.x = acc.x - data->caldata.x;
+-	data->accdata.y = acc.y - data->caldata.y;
+-	data->accdata.z = acc.z - data->caldata.z;
+-
+-	input_report_rel(data->input, REL_X, data->accdata.x);
+-	input_report_rel(data->input, REL_Y, data->accdata.y);
+-	input_report_rel(data->input, REL_Z, data->accdata.z);
++	acc.x = acc.x - data->caldata.x;
++	acc.y = acc.y - data->caldata.y;
++	acc.z = acc.z - data->caldata.z;
++	data->accdata = acc;
++
++	acc.x = (acc.x >= 0) ? (acc.x + 1) : (acc.x - 1);
++	acc.y = (acc.y >= 0) ? (acc.y + 1) : (acc.y - 1);
++	acc.z = (acc.z >= 0) ? (acc.z + 1) : (acc.z - 1);
++
++	if (data->ts_old != 0 && ((ts_new - data->ts_old) * 10 > delay * 18)) {
++		for (ts = data->ts_old + delay; ts < ts_new - ts_shift; ts += delay) {
++			time_hi = (int)((ts & TIME_HI_MASK) >> TIME_HI_SHIFT);
++			time_lo = (int)(ts & TIME_LO_MASK);
++			time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++			time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
++			input_report_rel(data->input, REL_X, acc.x);
++			input_report_rel(data->input, REL_Y, acc.y);
++			input_report_rel(data->input, REL_Z, acc.z);
++			input_report_rel(data->input, REL_DIAL, time_hi);
++			input_report_rel(data->input, REL_MISC, time_lo);
++			input_sync(data->input);
++			data->ts_old = ts;
++		}
++	}
++
++	time_hi = (int)((ts_new & TIME_HI_MASK) >> TIME_HI_SHIFT);
++	time_lo = (int)(ts_new & TIME_LO_MASK);
++	time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++	time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
++	input_report_rel(data->input, REL_X, acc.x);
++	input_report_rel(data->input, REL_Y, acc.y);
++	input_report_rel(data->input, REL_Z, acc.z);
++	input_report_rel(data->input, REL_DIAL, time_hi);
++	input_report_rel(data->input, REL_MISC, time_lo);
+ 	input_sync(data->input);
++	data->ts_old = ts_new;
+ 
+ exit:
+ 	if ((ktime_to_ns(data->poll_delay) * (int64_t)data->time_count)
+@@ -503,6 +544,7 @@
+ 
+ 	if (enable) {
+ 		if (pre_enable == OFF) {
++			data->ts_old = 0ULL;
+ 			bma255_open_calibration(data);
+ 			bma255_set_mode(data, BMA255_MODE_NORMAL);
+ 			atomic_set(&data->enable, ON);
+@@ -658,7 +700,7 @@
+ 		else
+ 			bma255_set_mode(data, BMA255_MODE_NORMAL);
+ 
+-		msleep(300);
++		usleep_range(300000, 301000);
+ 
+ 		for (cnt = 0; cnt < CALIBRATION_DATA_AMOUNT; cnt++) {
+ 			bma255_read_accel_xyz(data, &acc);
+@@ -761,7 +803,7 @@
+ 
+ 	if (atomic_read(&data->enable) == OFF) {
+ 		bma255_set_mode(data, BMA255_MODE_NORMAL);
+-		msleep(20);
++		usleep_range(20000, 21000);
+ 		bma255_read_accel_xyz(data, &acc);
+ 		bma255_set_mode(data, BMA255_MODE_SUSPEND);
+ 
+@@ -992,6 +1034,8 @@
+ 	input_set_capability(dev, EV_REL, REL_X);
+ 	input_set_capability(dev, EV_REL, REL_Y);
+ 	input_set_capability(dev, EV_REL, REL_Z);
++	input_set_capability(dev, EV_REL, REL_DIAL); /* time_hi */
++	input_set_capability(dev, EV_REL, REL_MISC); /* time_lo */
+ 	input_set_drvdata(dev, data);
+ 
+ 	ret = input_register_device(dev);
+@@ -1140,7 +1184,7 @@
+ 				__func__, (unsigned int)ret & 0x00ff);
+ 			break;
+ 		}
+-		msleep(20);
++		usleep_range(20000, 21000);
+ 	}
+ 
+ 	if (i >= CHIP_ID_RETRIES) {
+diff -X dontdiff -Nuarb a/drivers/sensors/bma280.c b/drivers/sensors/bma280.c
+--- a/drivers/sensors/bma280.c	2016-01-06 15:00:43.077590571 -0500
++++ b/drivers/sensors/bma280.c	2015-12-01 05:56:51.000000000 -0500
+@@ -105,6 +105,7 @@
+ 	int sda_gpio;
+ 	int scl_gpio;
+ 	int time_count;
++	u64 ts_old;
+ };
+ 
+ static int bma280_open_calibration(struct bma280_p *);
+@@ -437,20 +438,60 @@
+ {
+ 	int ret;
+ 	struct bma280_v acc;
++	int time_hi, time_lo;
++	struct timespec time_spec;
++	u64 ts_new, ts_shift, ts;
++	unsigned long delay;
+ 	struct bma280_p *data = container_of(work, struct bma280_p, work);
+ 
++	delay = ktime_to_ns(data->poll_delay);
++	time_spec = ktime_to_timespec(alarm_get_elapsed_realtime());
++	ts_new = time_spec.tv_sec * 1000000000ULL + time_spec.tv_nsec;
++	ts_shift = delay >> 1;
++	ts = 0ULL;
++
+ 	ret = bma280_read_accel_xyz(data, &acc);
+ 	if (ret < 0)
+ 		goto exit;
+ 
+-	data->accdata.x = acc.x - data->caldata.x;
+-	data->accdata.y = acc.y - data->caldata.y;
+-	data->accdata.z = acc.z - data->caldata.z;
+-
+-	input_report_rel(data->input, REL_X, data->accdata.x);
+-	input_report_rel(data->input, REL_Y, data->accdata.y);
+-	input_report_rel(data->input, REL_Z, data->accdata.z);
++	acc.x = acc.x - data->caldata.x;
++	acc.y = acc.y - data->caldata.y;
++	acc.z = acc.z - data->caldata.z;
++	data->accdata = acc;
++
++	acc.x = (acc.x >= 0) ? (acc.x + 1) : (acc.x - 1);
++	acc.y = (acc.y >= 0) ? (acc.y + 1) : (acc.y - 1);
++	acc.z = (acc.z >= 0) ? (acc.z + 1) : (acc.z - 1);
++
++	if (data->ts_old != 0 && ((ts_new - data->ts_old) * 10 > delay * 18)) {
++		for (ts = data->ts_old + delay; ts < ts_new - ts_shift; ts += delay) {
++			time_hi = (int)((ts & TIME_HI_MASK) >> TIME_HI_SHIFT);
++			time_lo = (int)(ts & TIME_LO_MASK);
++			time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++			time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
++			input_report_rel(data->input, REL_X, acc.x);
++			input_report_rel(data->input, REL_Y, acc.y);
++			input_report_rel(data->input, REL_Z, acc.z);
++			input_report_rel(data->input, REL_DIAL, time_hi);
++			input_report_rel(data->input, REL_MISC, time_lo);
++			input_sync(data->input);
++			data->ts_old = ts;
++		}
++	}
++
++	time_hi = (int)((ts_new & TIME_HI_MASK) >> TIME_HI_SHIFT);
++	time_lo = (int)(ts_new & TIME_LO_MASK);
++	time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++	time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
++	input_report_rel(data->input, REL_X, acc.x);
++	input_report_rel(data->input, REL_Y, acc.y);
++	input_report_rel(data->input, REL_Z, acc.z);
++	input_report_rel(data->input, REL_DIAL, time_hi);
++	input_report_rel(data->input, REL_MISC, time_lo);
+ 	input_sync(data->input);
++	data->ts_old = ts_new;
+ 
+ exit:
+ 	if ((ktime_to_ns(data->poll_delay) * (int64_t)data->time_count)
+@@ -500,6 +541,7 @@
+ 
+ 	if (enable) {
+ 		if (pre_enable == OFF) {
++			data->ts_old = 0ULL;
+ 			bma280_open_calibration(data);
+ 			bma280_set_mode(data, BMA280_MODE_NORMAL);
+ 			atomic_set(&data->enable, ON);
+@@ -655,7 +697,7 @@
+ 		else
+ 			bma280_set_mode(data, BMA280_MODE_NORMAL);
+ 
+-		msleep(300);
++		usleep_range(300000, 301000);
+ 
+ 		for (cnt = 0; cnt < CALIBRATION_DATA_AMOUNT; cnt++) {
+ 			bma280_read_accel_xyz(data, &acc);
+@@ -758,7 +800,7 @@
+ 
+ 	if (atomic_read(&data->enable) == OFF) {
+ 		bma280_set_mode(data, BMA280_MODE_NORMAL);
+-		msleep(20);
++		usleep_range(20000, 21000);
+ 		bma280_read_accel_xyz(data, &acc);
+ 		bma280_set_mode(data, BMA280_MODE_SUSPEND);
+ 
+@@ -989,6 +1031,8 @@
+ 	input_set_capability(dev, EV_REL, REL_X);
+ 	input_set_capability(dev, EV_REL, REL_Y);
+ 	input_set_capability(dev, EV_REL, REL_Z);
++	input_set_capability(dev, EV_REL, REL_DIAL);
++	input_set_capability(dev, EV_REL, REL_MISC);
+ 	input_set_drvdata(dev, data);
+ 
+ 	ret = input_register_device(dev);
+@@ -1135,7 +1179,7 @@
+ 				__func__, (unsigned int)ret & 0x00ff);
+ 			break;
+ 		}
+-		msleep(20);
++		usleep_range(20000, 21000);
+ 	}
+ 
+ 	if (i >= CHIP_ID_RETRIES) {
+diff -X dontdiff -Nuarb a/drivers/sensors/bmg160.c b/drivers/sensors/bmg160.c
+--- a/drivers/sensors/bmg160.c	2016-01-06 15:00:43.077590571 -0500
++++ b/drivers/sensors/bmg160.c	2015-12-01 05:56:51.000000000 -0500
+@@ -81,6 +81,7 @@
+ 	int gyro_dps;
+ 	int gyro_int;
+ 	int gyro_drdy;
++	u64 ts_old;
+ };
+ 
+ static int bmg160_open_calibration(struct bmg160_p *);
+@@ -288,7 +289,7 @@
+ 	temp = BMG160_SET_BITSLICE(temp, BMG160_BW_ADDR, bandwidth);
+ 	ret += bmg160_i2c_write(data->client, BMG160_BW_ADDR__REG, temp);
+ 
+-	pr_info("[SENSOR]: %s - change bandwidth %u\n", __func__, bandwidth);
++	pr_info("[SENSOR]: %s - bandwidth = %u, ret = %d\n", __func__, bandwidth, ret);
+ 	return ret;
+ }
+ 
+@@ -376,6 +377,7 @@
+ 		break;
+ 	}
+ 
++	pr_info("[SENSOR]: %s - mode = %u, ret = %d\n", __func__, mode, ret);
+ 	return ret;
+ }
+ 
+@@ -443,17 +445,60 @@
+ {
+ 	int ret;
+ 	struct bmg160_v gyro;
++	int time_hi, time_lo;
++	struct timespec time_spec;
++	u64 ts_new, ts_shift, ts;
++	unsigned long delay;
+ 	struct bmg160_p *data = container_of(work, struct bmg160_p, work);
+ 
++	delay = ktime_to_ns(data->poll_delay);
++	time_spec = ktime_to_timespec(alarm_get_elapsed_realtime());
++	ts_new = time_spec.tv_sec * 1000000000ULL + time_spec.tv_nsec;
++	ts_shift = delay >> 1;
++	ts = 0ULL;
++
+ 	ret = bmg160_read_gyro_xyz(data, &gyro);
+ 	if (ret < 0)
+ 		return;
+ 
+-	input_report_rel(data->input, REL_RX, gyro.x - data->caldata.x);
+-	input_report_rel(data->input, REL_RY, gyro.y - data->caldata.y);
+-	input_report_rel(data->input, REL_RZ, gyro.z - data->caldata.z);
+-	input_sync(data->input);
++	gyro.x = gyro.x - data->caldata.x;
++	gyro.y = gyro.y - data->caldata.y;
++	gyro.z = gyro.z - data->caldata.z;
+ 	data->gyrodata = gyro;
++
++	gyro.x = (gyro.x >= 0) ? (gyro.x + 1) : (gyro.x - 1);
++	gyro.y = (gyro.y >= 0) ? (gyro.y + 1) : (gyro.y - 1);
++	gyro.z = (gyro.z >= 0) ? (gyro.z + 1) : (gyro.z - 1);
++
++	if (data->ts_old != 0 && ((ts_new - data->ts_old) * 10 > delay * 18)) {
++		for (ts = data->ts_old + delay; ts < ts_new - ts_shift; ts += delay) {
++			time_hi = (int)((ts & TIME_HI_MASK) >> TIME_HI_SHIFT);
++			time_lo = (int)(ts & TIME_LO_MASK);
++			time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++			time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
++			input_report_rel(data->input, REL_RX, gyro.x);
++			input_report_rel(data->input, REL_RY, gyro.y);
++			input_report_rel(data->input, REL_RZ, gyro.z);
++			input_report_rel(data->input, REL_X, time_hi);
++			input_report_rel(data->input, REL_Y, time_lo);
++			input_sync(data->input);
++			data->ts_old = ts;
++		}
++	}
++
++	time_hi = (int)((ts_new & TIME_HI_MASK) >> TIME_HI_SHIFT);
++	time_lo = (int)(ts_new & TIME_LO_MASK);
++	time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++	time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
++	input_report_rel(data->input, REL_RX, gyro.x);
++	input_report_rel(data->input, REL_RY, gyro.y);
++	input_report_rel(data->input, REL_RZ, gyro.z);
++	input_report_rel(data->input, REL_X, time_hi);
++	input_report_rel(data->input, REL_Y, time_lo);
++	input_sync(data->input);
++	data->ts_old = ts_new;
+ }
+ 
+ static void bmg160_set_enable(struct bmg160_p *data, int enable)
+@@ -493,8 +538,10 @@
+ 
+ 	if (enable) {
+ 		if (pre_enable == OFF) {
++			data->ts_old = 0ULL;
+ 			bmg160_open_calibration(data);
+ 			bmg160_set_mode(data, BMG160_MODE_NORMAL);
++			usleep_range(30000, 31000);
+ 			atomic_set(&data->enable, ON);
+ 			bmg160_set_enable(data, ON);
+ 		}
+@@ -716,7 +763,7 @@
+ 	else
+ 		bmg160_set_mode(data, BMG160_MODE_NORMAL);
+ 
+-	msleep(100);
++	usleep_range(100000, 101000);
+ 
+ 	if (dEnable == 1)
+ 		bmg160_get_caldata(data);
+@@ -740,7 +787,7 @@
+ 
+ 	if (atomic_read(&data->enable) == OFF) {
+ 		bmg160_set_mode(data, BMG160_MODE_NORMAL);
+-		msleep(30);
++		usleep_range(30000, 31000);
+ 		bmg160_read_gyro_xyz(data, &data->gyrodata);
+ 		bmg160_set_mode(data, BMG160_MODE_SUSPEND);
+ 	}
+@@ -762,7 +809,7 @@
+ 	if (atomic_read(&data->enable) == OFF)
+ 		bmg160_set_mode(data, BMG160_MODE_NORMAL);
+ 
+-	msleep(100);
++	usleep_range(100000, 101000);
+ 
+ 	bmg160_i2c_read(data->client, BMG160_TEMP_ADDR, &tmp);
+ 	temperature = 24 + ((s8)tmp / 2);
+@@ -850,7 +897,7 @@
+ 	else
+ 		bmg160_set_mode(data, BMG160_MODE_NORMAL);
+ 
+-	msleep(100);
++	usleep_range(100000, 101000);
+ 	bist = bmg160_selftest(data);
+ 	if (bist == 0)
+ 		selftest |= 1;
+@@ -858,7 +905,7 @@
+ 	data->gyro_dps = BMG160_RANGE_2000DPS;
+ 	bmg160_set_range(data, data->gyro_dps);
+ 
+-	msleep(100);
++	usleep_range(100000, 101000);
+ 	memset(sum, 0, sizeof(int) * 3);
+ 	for (cnt = 0; cnt < SELFTEST_DATA_AMOUNT; cnt++) {
+ 		bmg160_read_gyro_xyz(data, &avg);
+@@ -976,6 +1023,8 @@
+ 	input_set_capability(dev, EV_REL, REL_RX);
+ 	input_set_capability(dev, EV_REL, REL_RY);
+ 	input_set_capability(dev, EV_REL, REL_RZ);
++	input_set_capability(dev, EV_REL, REL_X); /* time_hi */
++	input_set_capability(dev, EV_REL, REL_Y); /* time_lo */
+ 
+ 	input_set_drvdata(dev, data);
+ 
+diff -X dontdiff -Nuarb a/drivers/sensors/cm3323.c b/drivers/sensors/cm3323.c
+--- a/drivers/sensors/cm3323.c	2016-01-06 15:00:43.077590571 -0500
++++ b/drivers/sensors/cm3323.c	2015-12-01 05:56:46.000000000 -0500
+@@ -78,6 +78,7 @@
+ #ifdef CONFIG_SEC_RUBENS_PROJECT
+ 	struct regulator *vdd_2p85;
+ #endif
++	u64 timestamp;
+ };
+ 
+ #ifdef CONFIG_SEC_RUBENS_PROJECT
+@@ -106,7 +107,7 @@
+ 				pr_err("%s: error vdd_2p85 disabling regulator\n",__func__);
+ 		}
+ 	}
+-	msleep(30);
++	usleep_range(30000, 31000);
+ 	return;
+ }
+ #endif
+@@ -184,10 +185,19 @@
+ 
+ static void cm3323_work_func_light(struct work_struct *work)
+ {
++	struct timespec ts;
++	int time_hi, time_lo;
+ 	struct cm3323_p *data = container_of((struct delayed_work *)work,
+ 			struct cm3323_p, work);
+ 	unsigned long delay = nsecs_to_jiffies(atomic_read(&data->delay));
+ 
++	ts = ktime_to_timespec(alarm_get_elapsed_realtime());
++	data->timestamp = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
++	time_lo = (int)(data->timestamp & TIME_LO_MASK);
++	time_hi = (int)((data->timestamp & TIME_HI_MASK) >> TIME_HI_SHIFT);
++	time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
++	time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
++
+ 	cm3323_i2c_read_word(data, REG_RED, &data->color[0]);
+ 	cm3323_i2c_read_word(data, REG_GREEN, &data->color[1]);
+ 	cm3323_i2c_read_word(data, REG_BLUE, &data->color[2]);
+@@ -197,6 +207,8 @@
+ 	input_report_rel(data->input, REL_GREEN, data->color[1] + 1);
+ 	input_report_rel(data->input, REL_BLUE, data->color[2] + 1);
+ 	input_report_rel(data->input, REL_WHITE, data->color[3] + 1);
++	input_report_rel(data->input, REL_X, time_hi);
++	input_report_rel(data->input, REL_Y, time_lo);
+ 	input_sync(data->input);
+ 
+ 	if (((int64_t)atomic_read(&data->delay) * (int64_t)data->time_count)
+@@ -371,6 +383,8 @@
+ 	input_set_capability(dev, EV_REL, REL_GREEN);
+ 	input_set_capability(dev, EV_REL, REL_BLUE);
+ 	input_set_capability(dev, EV_REL, REL_WHITE);
++	input_set_capability(dev, EV_REL, REL_X);
++	input_set_capability(dev, EV_REL, REL_Y);
+ 	input_set_drvdata(dev, data);
+ 
+ 	ret = input_register_device(dev);
+diff -X dontdiff -Nuarb a/drivers/sensors/k2hh.c b/drivers/sensors/k2hh.c
+--- a/drivers/sensors/k2hh.c	2016-01-06 15:00:43.078590571 -0500
++++ b/drivers/sensors/k2hh.c	2015-12-01 05:56:46.000000000 -0500
+@@ -169,6 +169,8 @@
+ 	u8 negate_x;
+ 	u8 negate_y;
+ 	u8 negate_z;
++
++	u64 old_timestamp;
+ };
+ 
+ #define ACC_ODR10		0x10	/*   10Hz output data rate */
+@@ -508,6 +510,9 @@
+ 	int ret;
+ 	struct k2hh_v acc;
+ 	struct k2hh_p *data = container_of(work, struct k2hh_p, work);
++	struct timespec ts = ktime_to_timespec(alarm_get_elapsed_realtime());
++	u64 timestamp_new = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
++	int time_hi, time_lo;
+ 
+ 	ret = k2hh_read_accel_xyz(data, &acc);
+ 	if (ret < 0)
+@@ -516,12 +521,32 @@
+ 	data->accdata.x = acc.x - data->caldata.x;
+ 	data->accdata.y = acc.y - data->caldata.y;
+ 	data->accdata.z = acc.z - data->caldata.z;
+-
++	if (data->old_timestamp != 0 && 
++		((timestamp_new - data->old_timestamp) > ktime_to_ms(data->poll_delay) * 1800000LL)) {
++		u64 delay = ktime_to_ns(data->poll_delay);
++		u64 shift_timestamp = delay >> 1;
++		u64 timestamp = 0ULL;
++		for (timestamp = data->old_timestamp + delay; timestamp < timestamp_new - shift_timestamp; timestamp+=delay) {
++			time_hi = (int)((timestamp & TIME_HI_MASK) >> TIME_HI_SHIFT);
++			time_lo = (int)(timestamp & TIME_LO_MASK);
+ 	input_report_rel(data->input, REL_X, data->accdata.x);
+ 	input_report_rel(data->input, REL_Y, data->accdata.y);
+ 	input_report_rel(data->input, REL_Z, data->accdata.z);
++			input_report_rel(data->input, REL_DIAL, time_hi);
++			input_report_rel(data->input, REL_MISC, time_lo);
+ 	input_sync(data->input);
++		}
++	}
+ 
++	time_hi = (int)((timestamp_new & TIME_HI_MASK) >> TIME_HI_SHIFT);
++	time_lo = (int)(timestamp_new & TIME_LO_MASK);
++	input_report_rel(data->input, REL_X, data->accdata.x);
++	input_report_rel(data->input, REL_Y, data->accdata.y);
++	input_report_rel(data->input, REL_Z, data->accdata.z);
++	input_report_rel(data->input, REL_DIAL, time_hi);
++	input_report_rel(data->input, REL_MISC, time_lo);
++	input_sync(data->input);
++	data->old_timestamp = timestamp_new;
+ exit:
+ 	if ((ktime_to_ns(data->poll_delay) * (int64_t)data->time_count)
+ 		>= ((int64_t)ACCEL_LOG_TIME * NSEC_PER_SEC)) {
+@@ -570,6 +595,7 @@
+ 
+ 	if (enable) {
+ 		if (pre_enable == OFF) {
++			data->old_timestamp = 0LL;
+ 			sensor_regulator_onoff(data, true);
+ 
+ 			k2hh_open_calibration(data);
+@@ -614,6 +640,9 @@
+ 		return ret;
+ 	}
+ 
++	if (delay > K2HH_DEFAULT_DELAY)
++		delay = K2HH_DEFAULT_DELAY;
++
+ 	data->poll_delay = ns_to_ktime(delay);
+ 	k2hh_set_odr(data);
+ 
+@@ -1125,6 +1154,8 @@
+ 	input_set_capability(dev, EV_REL, REL_X);
+ 	input_set_capability(dev, EV_REL, REL_Y);
+ 	input_set_capability(dev, EV_REL, REL_Z);
++	input_set_capability(dev, EV_REL, REL_DIAL);
++	input_set_capability(dev, EV_REL, REL_MISC);
+ 	input_set_drvdata(dev, data);
+ 
+ 	ret = input_register_device(dev);
+diff -X dontdiff -Nuarb a/drivers/sensors/sensors_core.c b/drivers/sensors/sensors_core.c
+--- a/drivers/sensors/sensors_core.c	2016-01-06 15:00:43.079590571 -0500
++++ b/drivers/sensors/sensors_core.c	2015-12-01 05:56:46.000000000 -0500
+@@ -22,13 +22,18 @@
+ #include <linux/device.h>
+ #include <linux/fs.h>
+ #include <linux/err.h>
++#include <linux/input.h>
++#include "sensors_core.h"
+ #ifdef CONFIG_ADSP_FACTORY
+ #include <linux/kernel.h>
+ #endif
++
+ struct class *sensors_class;
+ struct class *sensors_event_class;
+ static struct device *symlink_dev;
+ static atomic_t sensor_count;
++static struct device *sensor_dev;
++static struct input_dev *meta_input_dev;
+ 
+ struct axis_remap {
+ 	int src_x:3;
+@@ -158,6 +163,32 @@
+ 		sysfs_delete_link(&symlink_dev->kobj, target, name);
+ }
+ 
++static ssize_t set_flush(struct device *dev, struct device_attribute *attr,
++	const char *buf, size_t size)
++{
++	int64_t dTemp;
++	u8 sensor_type = 0;
++
++	if (kstrtoll(buf, 10, &dTemp) < 0)
++		return -EINVAL;
++
++	sensor_type = (u8)dTemp;
++
++	input_report_rel(meta_input_dev, REL_DIAL, 1);
++	input_report_rel(meta_input_dev, REL_HWHEEL, sensor_type + 1);
++	input_sync(meta_input_dev);
++
++	pr_info("[SENSOR] flush %d\n", sensor_type);
++	return size;
++}
++
++static DEVICE_ATTR(flush, S_IWUSR | S_IWGRP, NULL, set_flush);
++
++static struct device_attribute *sensor_attr[] = {
++	&dev_attr_flush,
++	NULL,
++};
++
+ static void set_sensor_attr(struct device *dev,
+ 		struct device_attribute *attributes[])
+ {
+@@ -165,7 +196,7 @@
+ 
+ 	for (i = 0; attributes[i] != NULL; i++)
+ 		if ((device_create_file(dev, attributes[i])) < 0)
+-			pr_err("[SENSOR CORE] fail device_create_file"\
++			pr_err("[SENSOR CORE] device_create_file failed"\
+ 				"(dev, attributes[%d])\n", i);
+ }
+ 
+@@ -183,7 +214,7 @@
+ 	dev = device_create(sensors_class, NULL, 0, drvdata, "%s", name);
+ 	if (IS_ERR(dev)) {
+ 		ret = PTR_ERR(dev);
+-		pr_err("[SENSORS CORE] device_create failed![%d]\n", ret);
++		pr_err("[SENSORS CORE] device_create failed for %s [%d]\n", name, ret);
+ 		return ret;
+ 	}
+ 
+@@ -204,12 +235,15 @@
+ 
+ void destroy_sensor_class(void)
+ {
+-#ifdef CONFIG_ADSP_FACTORY
+ 	if (sensors_class) {
++		if (sensor_dev) {
++			device_destroy(sensors_class, sensor_dev->devt);
++			sensor_dev = NULL;
++		}
+ 		class_destroy(sensors_class);
+ 		sensors_class = NULL;
+ 	}
+-#endif
++
+ 	if (sensors_event_class) {
+ 		device_destroy(sensors_event_class, symlink_dev->devt);
+ 		class_destroy(sensors_event_class);
+@@ -218,6 +252,45 @@
+ 	}
+ }
+ 
++int sensors_meta_init(void)
++{
++	int ret;
++
++	meta_input_dev = input_allocate_device();
++	if (!meta_input_dev) {
++		pr_err("[SENSOR CORE] failed alloc meta dev\n");
++		return -ENOMEM;
++	}
++
++	meta_input_dev->name = "meta_event";
++	input_set_capability(meta_input_dev, EV_REL, REL_HWHEEL);
++	input_set_capability(meta_input_dev, EV_REL, REL_DIAL);
++
++	ret = input_register_device(meta_input_dev);
++	if (ret < 0) {
++		pr_err("[SENSOR CORE] failed register meta dev\n");
++		input_free_device(meta_input_dev);
++	}
++
++	ret = sensors_create_symlink(&meta_input_dev->dev.kobj,
++		meta_input_dev->name);
++	if (ret < 0) {
++		pr_err("[SENSOR CORE] failed create meta symlink\n");
++		input_unregister_device(meta_input_dev);
++		input_free_device(meta_input_dev);
++	}
++
++	return ret;
++}
++
++void sensors_meta_clean(void)
++{
++	sensors_remove_symlink(&meta_input_dev->dev.kobj,
++		meta_input_dev->name);
++	input_unregister_device(meta_input_dev);
++	input_free_device(meta_input_dev);
++}
++
+ #ifdef CONFIG_ADSP_FACTORY
+ 
+ extern  struct class* get_adsp_sensor_class( void );
+@@ -257,15 +330,27 @@
+ 		return PTR_ERR(symlink_dev);
+ 	}
+ 
++	/* Creating sensor_dev for flush sysfs node */
++	sensors_register(sensor_dev, NULL, sensor_attr, "sensor_dev");
++
+ 	atomic_set(&sensor_count, 0);
+ 	sensors_class->dev_uevent = NULL;
+ 
++	sensors_meta_init();
++
+ 	return 0;
+ }
+ 
+ static void __exit sensors_class_exit(void)
+ {
++	if (meta_input_dev)
++		sensors_meta_clean();
++
+ 	if (sensors_class || sensors_event_class) {
++		if (sensor_dev) {
++			device_destroy(sensors_class, sensor_dev->devt);
++			sensor_dev = NULL;
++		}
+ 		class_destroy(sensors_class);
+ 		sensors_class = NULL;
+ 		class_destroy(sensors_event_class);
+diff -X dontdiff -Nuarb a/drivers/sensors/sensors_core.h b/drivers/sensors/sensors_core.h
+--- a/drivers/sensors/sensors_core.h	2016-01-06 15:00:43.080590571 -0500
++++ b/drivers/sensors/sensors_core.h	2015-12-01 05:56:46.000000000 -0500
+@@ -19,12 +19,19 @@
+ #ifndef _SENSORS_CORE_H_
+ #define _SENSORS_CORE_H_
+ 
++#include <linux/android_alarm.h>
++/* report timestamp from kernel (for Android L) */
++#define TIME_LO_MASK 0x00000000FFFFFFFF
++#define TIME_HI_MASK 0xFFFFFFFF00000000
++#define TIME_HI_SHIFT 32
++
+ int sensors_create_symlink(struct kobject *, const char *);
+ void sensors_remove_symlink(struct kobject *, const char *);
+ int sensors_register(struct device *, void *,
+ 	struct device_attribute *[], char *);
+ void sensors_unregister(struct device *, struct device_attribute *[]);
+ void destroy_sensor_class(void);
+-void remap_sensor_data(s16 *, int);
++void remap_sensor_data(s16 *, u32);
++void remap_sensor_data_32(int *, u32);
+ 
+ #endif
+diff -X dontdiff -Nuarb a/drivers/sensors/sx9500.c b/drivers/sensors/sx9500.c
+--- a/drivers/sensors/sx9500.c	2016-01-06 15:00:43.080590571 -0500
++++ b/drivers/sensors/sx9500.c	2015-12-01 05:56:46.000000000 -0500
+@@ -33,7 +33,7 @@
+ #define VENDOR_NAME              "SEMTECH"
+ #define MODEL_NAME               "SX9500"
+ #define MODULE_NAME              "grip_sensor"
+-#define CALIBRATION_FILE_PATH    "/efs/grip_cal_data"
++#define CALIBRATION_FILE_PATH    "/efs/FactoryApp/grip_cal_data"
+ 
+ #define I2C_M_WR                 0 /* for i2c Write */
+ #define I2c_M_RD                 1 /* for i2c Read */
+diff -X dontdiff -Nuarb a/drivers/sensorhub/atmel/ssp_data.c b/drivers/sensorhub/atmel/ssp_data.c
+--- a/drivers/sensorhub/atmel/ssp_data.c	2016-01-06 15:00:43.064590570 -0500
++++ b/drivers/sensorhub/atmel/ssp_data.c	2015-12-01 05:56:44.000000000 -0500
+@@ -32,6 +32,36 @@
+ #define MCU_SLEEP_FACTORY_DATA_LENGTH		FACTORY_DATA_MAX
+ #define GESTURE_FACTORY_DATA_LENGTH     4
+ 
++static void get_timestamp(struct ssp_data *data, int iSensorData,
++	struct sensor_value *sensorsdata, struct ssp_time_diff *sensortime)
++{
++	if ((iSensorData == PROXIMITY_SENSOR) || (iSensorData == GESTURE_SENSOR)
++		|| (iSensorData == STEP_DETECTOR) || (iSensorData == SIG_MOTION_SENSOR)
++		|| (iSensorData == STEP_COUNTER)) {
++		sensorsdata->timestamp = data->timestamp;
++		return;
++	}
++
++	if (((sensortime->irq_diff * 10) >
++		(data->adDelayBuf[iSensorData] * 18))
++		&& ((sensortime->irq_diff * 10) <
++		(data->adDelayBuf[iSensorData] * 100))) {
++		u64 move_timestamp;
++		u64 shift_timestamp =
++			div64_long(data->adDelayBuf[iSensorData], 2);
++		for (move_timestamp = data->lastTimestamp[iSensorData] +
++			data->adDelayBuf[iSensorData];
++			move_timestamp < (data->timestamp - shift_timestamp);
++			move_timestamp += data->adDelayBuf[iSensorData]) {
++			sensorsdata->timestamp = move_timestamp;
++			data->report_sensor_data[iSensorData](data,
++				sensorsdata);
++		}
++	}
++	sensorsdata->timestamp = data->timestamp;
++}
++
++
+ /*************************************************************************/
+ /* SSP parsing the dataframe                                             */
+ /*************************************************************************/
+@@ -264,6 +294,7 @@
+ {
+ 	int iDataIdx, iSensorData;
+ 	struct sensor_value *sensorsdata;
++	struct ssp_time_diff sensortime;
+ 
+ 	sensorsdata = kzalloc(sizeof(*sensorsdata), GFP_KERNEL);
+ 	if (sensorsdata == NULL)
+@@ -280,11 +311,29 @@
+ 				kfree(sensorsdata);
+ 				return ERROR;
+ 			}
+-
++			sensortime.irq_diff = data->timestamp -
++				data->lastTimestamp[iSensorData];
+ 			data->get_sensor_data[iSensorData](pchRcvDataFrame,
+ 				&iDataIdx, sensorsdata);
++			get_timestamp(data, iSensorData, sensorsdata,
++				&sensortime);
++
++			if (sensortime.irq_diff > 1000000)
+ 			data->report_sensor_data[iSensorData](data,
+ 				sensorsdata);
++			else if ((iSensorData == PROXIMITY_SENSOR) ||
++				(iSensorData == PROXIMITY_RAW) ||
++				(iSensorData == GESTURE_SENSOR) ||
++				(iSensorData == SIG_MOTION_SENSOR) ||
++				(iSensorData == STEP_DETECTOR) ||
++				(iSensorData == STEP_COUNTER))
++				data->report_sensor_data[iSensorData](data,
++					sensorsdata);
++			else
++				pr_info("[SSP]: %s irq_diff is under 1ms(%d)\n",
++					__func__, iSensorData);
++
++			data->lastTimestamp[iSensorData] = data->timestamp;
+ 		} else if (pchRcvDataFrame[iDataIdx] ==
+ 			MSG2AP_INST_SELFTEST_DATA) {
+ 			iDataIdx++;
+diff -X dontdiff -Nuarb a/drivers/sensorhub/atmel/ssp_dev.c b/drivers/sensorhub/atmel/ssp_dev.c
+--- a/drivers/sensorhub/atmel/ssp_dev.c	2016-01-06 15:00:43.064590570 -0500
++++ b/drivers/sensorhub/atmel/ssp_dev.c	2015-12-01 05:56:44.000000000 -0500
+@@ -50,6 +50,10 @@
+ static irqreturn_t sensordata_irq_thread_fn(int iIrq, void *dev_id)
+ {
+ 	struct ssp_data *data = dev_id;
++	struct timespec ts;
++
++	ts = ktime_to_timespec(alarm_get_elapsed_realtime());
++	data->timestamp = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+ 
+ 	select_irq_msg(data);
+ 	data->uIrqCnt++;
+diff -X dontdiff -Nuarb a/drivers/sensorhub/atmel/ssp_firmware.c b/drivers/sensorhub/atmel/ssp_firmware.c
+--- a/drivers/sensorhub/atmel/ssp_firmware.c	2016-01-06 15:00:43.064590570 -0500
++++ b/drivers/sensorhub/atmel/ssp_firmware.c	2015-12-01 05:56:44.000000000 -0500
+@@ -18,7 +18,7 @@
+ #if defined(CONFIG_MACH_JACTIVESKT)
+ #define SSP_FIRMWARE_REVISION_03	14032500 /*MCU L5, 6500 fortius-skt*/
+ #else
+-#define SSP_FIRMWARE_REVISION_03	14082100/*MCU L5, 6500*/
++#define SSP_FIRMWARE_REVISION_03	14122201/*MCU L5, 6500*/
+ #endif
+ 
+ /* Bootload mode cmd */
+diff -X dontdiff -Nuarb a/drivers/sensorhub/atmel/ssp.h b/drivers/sensorhub/atmel/ssp.h
+--- a/drivers/sensorhub/atmel/ssp.h	2016-01-06 15:00:43.064590570 -0500
++++ b/drivers/sensorhub/atmel/ssp.h	2015-12-01 05:56:44.000000000 -0500
+@@ -34,6 +34,7 @@
+ #include <linux/delay.h>
+ #include <linux/firmware.h>
+ #include <linux/timer.h>
++#include <linux/android_alarm.h>
+ #include <linux/regulator/consumer.h>
+ 
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+@@ -94,7 +95,7 @@
+ enum {
+ 	SENSOR_NS_DELAY_FASTEST = 10000000,	/* 10msec */
+ 	SENSOR_NS_DELAY_GAME = 20000000,	/* 20msec */
+-	SENSOR_NS_DELAY_UI = 66700000,		/* 66.7msec */
++	SENSOR_NS_DELAY_UI =  66667000,		/* 66.667msec */
+ 	SENSOR_NS_DELAY_NORMAL = 200000000,	/* 200msec */
+ };
+ 
+@@ -212,6 +213,11 @@
+ #define MAX_GYRO	32767
+ #define MIN_GYRO	-32768
+ 
++/* report timestamp from kernel (for Android L) */
++#define TIME_LO_MASK 0x00000000FFFFFFFF
++#define TIME_HI_MASK 0xFFFFFFFF00000000
++#define TIME_HI_SHIFT 32
++
+ /* sensor combination, data->sns_combination */
+ enum {
+ 	INVENSENSE_MPU6500_AG = 0,
+@@ -273,6 +279,8 @@
+ 	OFFSET_CAL_DATA,
+ };
+ 
++#define META_DATA_FLUSH_COMPLETE 1
++
+ struct sensor_value {
+ 	union {
+ 		struct {
+@@ -293,6 +301,7 @@
+ 		u8 sig_motion;
+ 		u32 step_diff;
+ 	};
++	u64 timestamp;
+ };
+ 
+ extern struct class *sensors_event_class;
+@@ -311,6 +320,11 @@
+ 	char z;
+ };
+ 
++struct ssp_time_diff {
++	u64 time_diff;
++	u64 irq_diff;
++};
++
+ struct ssp_data {
+ 	struct input_dev *acc_input_dev;
+ 	struct input_dev *gyro_input_dev;
+@@ -323,6 +337,7 @@
+ 	struct input_dev *sig_motion_input_dev;
+ 	struct input_dev *step_det_input_dev;
+ 	struct input_dev *step_cnt_input_dev;
++	struct input_dev *meta_input_dev;
+ 	struct i2c_client *client;
+ 	struct wake_lock ssp_wake_lock;
+ 	struct miscdevice akmd_device;
+@@ -386,6 +401,8 @@
+ 	u64 step_count_total;
+ 	atomic_t aSensorEnable;
+ 	int64_t adDelayBuf[SENSOR_MAX];
++	u64 lastTimestamp[SENSOR_MAX];
++	u64 timestamp;
+ 
+ 	int (*wakeup_mcu)(void);
+ 	int (*check_mcu_ready)(void);
+diff -X dontdiff -Nuarb a/drivers/sensorhub/atmel/ssp_input.c b/drivers/sensorhub/atmel/ssp_input.c
+--- a/drivers/sensorhub/atmel/ssp_input.c	2016-01-06 15:00:43.064590570 -0500
++++ b/drivers/sensorhub/atmel/ssp_input.c	2015-12-01 05:56:44.000000000 -0500
+@@ -25,6 +25,8 @@
+ 
+ void report_acc_data(struct ssp_data *data, struct sensor_value *accdata)
+ {
++	int time_hi, time_lo;
++
+ 	convert_acc_data(&accdata->x);
+ 	convert_acc_data(&accdata->y);
+ 	convert_acc_data(&accdata->z);
+@@ -51,6 +53,8 @@
+ 		data->buf[ACCELEROMETER_SENSOR].z =
+ 			(data->buf[ACCELEROMETER_SENSOR].z > 0 ? MIN_ACCEL_2G : MAX_ACCEL_2G);
+ 	}
++	time_lo = (int)(accdata->timestamp & TIME_LO_MASK);
++	time_hi = (int)((accdata->timestamp & TIME_HI_MASK) >> TIME_HI_SHIFT);
+ 
+ 	input_report_rel(data->acc_input_dev, REL_X,
+ 		data->buf[ACCELEROMETER_SENSOR].x);
+@@ -58,12 +62,15 @@
+ 		data->buf[ACCELEROMETER_SENSOR].y);
+ 	input_report_rel(data->acc_input_dev, REL_Z,
+ 		data->buf[ACCELEROMETER_SENSOR].z);
++	input_report_rel(data->acc_input_dev, REL_DIAL, time_hi);
++	input_report_rel(data->acc_input_dev, REL_MISC, time_lo);
+ 	input_sync(data->acc_input_dev);
+ }
+ 
+ void report_gyro_data(struct ssp_data *data, struct sensor_value *gyrodata)
+ {
+-	long lTemp[3] = {0,};
++	long lTemp[6] = {0,};
++	int time_hi, time_lo;
+ 	data->buf[GYROSCOPE_SENSOR].x = gyrodata->x - data->gyrocal.x;
+ 	data->buf[GYROSCOPE_SENSOR].y = gyrodata->y - data->gyrocal.y;
+ 	data->buf[GYROSCOPE_SENSOR].z = gyrodata->z - data->gyrocal.z;
+@@ -88,34 +95,57 @@
+ 	}
+ 
+ 	if (data->uGyroDps == GYROSCOPE_DPS500) {
+-		lTemp[0] = (long)data->buf[GYROSCOPE_SENSOR].x;
+-		lTemp[1] = (long)data->buf[GYROSCOPE_SENSOR].y;
+-		lTemp[2] = (long)data->buf[GYROSCOPE_SENSOR].z;
++		lTemp[0] = (long)gyrodata->x;
++		lTemp[1] = (long)gyrodata->y;
++		lTemp[2] = (long)gyrodata->z;
++		lTemp[3] = (long)data->gyrocal.x;
++		lTemp[4] = (long)data->gyrocal.y;
++		lTemp[5] = (long)data->gyrocal.z;
+ 	} else if (data->uGyroDps == GYROSCOPE_DPS250)	{
+-		lTemp[0] = (long)data->buf[GYROSCOPE_SENSOR].x >> 1;
+-		lTemp[1] = (long)data->buf[GYROSCOPE_SENSOR].y >> 1;
+-		lTemp[2] = (long)data->buf[GYROSCOPE_SENSOR].z >> 1;
++		lTemp[0] = (long)gyrodata->x >> 1;
++		lTemp[1] = (long)gyrodata->y >> 1;
++		lTemp[2] = (long)gyrodata->z >> 1;
++		lTemp[3] = (long)data->gyrocal.x >> 1;
++		lTemp[4] = (long)data->gyrocal.y >> 1;
++		lTemp[5] = (long)data->gyrocal.z >> 1;
+ 	} else if (data->uGyroDps == GYROSCOPE_DPS2000)	{
+-		lTemp[0] = (long)data->buf[GYROSCOPE_SENSOR].x << 2;
+-		lTemp[1] = (long)data->buf[GYROSCOPE_SENSOR].y << 2;
+-		lTemp[2] = (long)data->buf[GYROSCOPE_SENSOR].z << 2;
++		lTemp[0] = (long)gyrodata->x << 2;
++		lTemp[1] = (long)gyrodata->y << 2;
++		lTemp[2] = (long)gyrodata->z << 2;
++		lTemp[3] = (long)data->gyrocal.x << 2;
++		lTemp[4] = (long)data->gyrocal.y << 2;
++		lTemp[5] = (long)data->gyrocal.z << 2;
+ 	} else {
+-		lTemp[0] = (long)data->buf[GYROSCOPE_SENSOR].x;
+-		lTemp[1] = (long)data->buf[GYROSCOPE_SENSOR].y;
+-		lTemp[2] = (long)data->buf[GYROSCOPE_SENSOR].z;
+-	}
+-
+-	input_report_rel(data->gyro_input_dev, REL_RX, lTemp[0]);
+-	input_report_rel(data->gyro_input_dev, REL_RY, lTemp[1]);
+-	input_report_rel(data->gyro_input_dev, REL_RZ, lTemp[2]);
++		lTemp[0] = (long)gyrodata->x;
++		lTemp[1] = (long)gyrodata->y;
++		lTemp[2] = (long)gyrodata->z;
++		lTemp[3] = (long)data->gyrocal.x;
++		lTemp[4] = (long)data->gyrocal.y;
++		lTemp[5] = (long)data->gyrocal.z;
++	}
++
++	time_lo = (int)(gyrodata->timestamp & TIME_LO_MASK);
++	time_hi = (int)((gyrodata->timestamp & TIME_HI_MASK) >> TIME_HI_SHIFT);
++
++	input_report_rel(data->gyro_input_dev, REL_RX, lTemp[0] + 1);
++	input_report_rel(data->gyro_input_dev, REL_RY, lTemp[1] + 1);
++	input_report_rel(data->gyro_input_dev, REL_RZ, lTemp[2] + 1);
++	input_report_rel(data->gyro_input_dev, REL_HWHEEL, lTemp[3] + 1);
++	input_report_rel(data->gyro_input_dev, REL_DIAL, lTemp[4] + 1);
++	input_report_rel(data->gyro_input_dev, REL_WHEEL, lTemp[5] + 1);
++	input_report_rel(data->gyro_input_dev, REL_X, time_hi);
++	input_report_rel(data->gyro_input_dev, REL_Y, time_lo);
+ 	input_sync(data->gyro_input_dev);
+ }
+ 
+ void report_mag_data(struct ssp_data *data, struct sensor_value *magdata)
+ {
++	int time_hi, time_lo;
+ 	data->buf[GEOMAGNETIC_SENSOR].x = magdata->x;
+ 	data->buf[GEOMAGNETIC_SENSOR].y = magdata->y;
+ 	data->buf[GEOMAGNETIC_SENSOR].z = magdata->z;
++	time_lo = (int)(magdata->timestamp & TIME_LO_MASK);
++	time_hi = (int)((magdata->timestamp & TIME_HI_MASK) >> TIME_HI_SHIFT);
+ 
+ 	input_report_rel(data->mag_input_dev, REL_RX,
+ 		data->buf[GEOMAGNETIC_SENSOR].x);
+@@ -123,6 +153,8 @@
+ 		data->buf[GEOMAGNETIC_SENSOR].y);
+ 	input_report_rel(data->mag_input_dev, REL_RZ,
+ 		data->buf[GEOMAGNETIC_SENSOR].z);
++	input_report_rel(data->mag_input_dev, REL_X, time_hi);
++	input_report_rel(data->mag_input_dev, REL_Y, time_lo);
+ 	input_sync(data->mag_input_dev);
+ }
+ 
+@@ -370,8 +402,18 @@
+ 	if (iRet < 0)
+ 		goto iRet_step_cnt_sysfs_create_link;
+ 
++	iRet = sysfs_create_link(&data->sen_dev->kobj,
++		&data->meta_input_dev->dev.kobj,
++		data->meta_input_dev->name);
++	if (iRet < 0)
++		goto iRet_meta_sysfs_create_link;
++
+ 	return SUCCESS;
+ 
++iRet_meta_sysfs_create_link:
++	sysfs_delete_link(&data->sen_dev->kobj,
++		&data->step_cnt_input_dev->dev.kobj,
++		data->step_cnt_input_dev->name);
+ iRet_step_cnt_sysfs_create_link:
+ 	sysfs_delete_link(&data->sen_dev->kobj,
+ 		&data->step_det_input_dev->dev.kobj,
+@@ -453,6 +495,9 @@
+ 	sysfs_delete_link(&data->sen_dev->kobj,
+ 		&data->step_cnt_input_dev->dev.kobj,
+ 		data->step_cnt_input_dev->name);
++	sysfs_delete_link(&data->sen_dev->kobj,
++		&data->meta_input_dev->dev.kobj,
++		data->meta_input_dev->name);
+ }
+ 
+ int initialize_input_dev(struct ssp_data *data)
+@@ -461,7 +506,7 @@
+ 	struct input_dev *acc_input_dev, *gyro_input_dev, *pressure_input_dev,
+ 		*light_input_dev, *prox_input_dev, *temp_humi_input_dev,
+ 		*mag_input_dev, *gesture_input_dev, *sig_motion_input_dev,
+-		*step_det_input_dev, *step_cnt_input_dev;
++		*step_det_input_dev, *step_cnt_input_dev, *meta_input_dev;
+ 
+ 	/* allocate input_device */
+ 	acc_input_dev = input_allocate_device();
+@@ -508,6 +553,10 @@
+ 	if (step_cnt_input_dev == NULL)
+ 		goto iRet_step_cnt_input_free_device;
+ 
++	meta_input_dev = input_allocate_device();
++	if (meta_input_dev == NULL)
++		goto iRet_meta_input_free_device;
++
+ 	input_set_drvdata(acc_input_dev, data);
+ 	input_set_drvdata(gyro_input_dev, data);
+ 	input_set_drvdata(pressure_input_dev, data);
+@@ -519,6 +568,7 @@
+ 	input_set_drvdata(sig_motion_input_dev, data);
+ 	input_set_drvdata(step_det_input_dev, data);
+ 	input_set_drvdata(step_cnt_input_dev, data);
++	input_set_drvdata(meta_input_dev, data);
+ 
+ 	acc_input_dev->name = "accelerometer_sensor";
+ 	gyro_input_dev->name = "gyro_sensor";
+@@ -531,14 +581,22 @@
+ 	sig_motion_input_dev->name = "sig_motion_sensor";
+ 	step_det_input_dev->name = "step_det_sensor";
+ 	step_cnt_input_dev->name = "step_cnt_sensor";
++	meta_input_dev->name = "meta_event";
+ 
+ 	input_set_capability(acc_input_dev, EV_REL, REL_X);
+ 	input_set_capability(acc_input_dev, EV_REL, REL_Y);
+ 	input_set_capability(acc_input_dev, EV_REL, REL_Z);
++	input_set_capability(acc_input_dev, EV_REL, REL_DIAL); /* time_hi */
++	input_set_capability(acc_input_dev, EV_REL, REL_MISC); /* time_lo */
+ 
+ 	input_set_capability(gyro_input_dev, EV_REL, REL_RX);
+ 	input_set_capability(gyro_input_dev, EV_REL, REL_RY);
+ 	input_set_capability(gyro_input_dev, EV_REL, REL_RZ);
++	input_set_capability(gyro_input_dev, EV_REL, REL_HWHEEL);
++	input_set_capability(gyro_input_dev, EV_REL, REL_DIAL);
++	input_set_capability(gyro_input_dev, EV_REL, REL_WHEEL);
++	input_set_capability(gyro_input_dev, EV_REL, REL_X); /* time_hi */
++	input_set_capability(gyro_input_dev, EV_REL, REL_Y); /* time_lo */
+ 
+ 	input_set_capability(pressure_input_dev, EV_REL, REL_HWHEEL);
+ 	input_set_capability(pressure_input_dev, EV_REL, REL_DIAL);
+@@ -578,6 +636,8 @@
+ 	input_set_capability(mag_input_dev, EV_REL, REL_RX);
+ 	input_set_capability(mag_input_dev, EV_REL, REL_RY);
+ 	input_set_capability(mag_input_dev, EV_REL, REL_RZ);
++	input_set_capability(mag_input_dev, EV_REL, REL_X); /* time_hi */
++	input_set_capability(mag_input_dev, EV_REL, REL_Y); /* time_lo */
+ 
+ 	input_set_capability(sig_motion_input_dev, EV_REL, REL_MISC);
+ 
+@@ -585,6 +645,9 @@
+ 
+ 	input_set_capability(step_cnt_input_dev, EV_REL, REL_MISC);
+ 
++	input_set_capability(meta_input_dev, EV_REL, REL_HWHEEL);
++	input_set_capability(meta_input_dev, EV_REL, REL_DIAL);
++
+ 	/* register input_device */
+ 	iRet = input_register_device(acc_input_dev);
+ 	if (iRet < 0)
+@@ -602,6 +665,7 @@
+ 		input_free_device(sig_motion_input_dev);
+ 		input_free_device(step_det_input_dev);
+ 		input_free_device(step_cnt_input_dev);
++		input_free_device(meta_input_dev);
+ 		goto iRet_gyro_input_unreg_device;
+ 	}
+ 
+@@ -616,6 +680,7 @@
+ 		input_free_device(sig_motion_input_dev);
+ 		input_free_device(step_det_input_dev);
+ 		input_free_device(step_cnt_input_dev);
++		input_free_device(meta_input_dev);
+ 		goto iRet_pressure_input_unreg_device;
+ 	}
+ 
+@@ -629,6 +694,7 @@
+ 		input_free_device(sig_motion_input_dev);
+ 		input_free_device(step_det_input_dev);
+ 		input_free_device(step_cnt_input_dev);
++		input_free_device(meta_input_dev);
+ 		goto iRet_gesture_input_unreg_device;
+ 	}
+ 
+@@ -641,6 +707,7 @@
+ 		input_free_device(sig_motion_input_dev);
+ 		input_free_device(step_det_input_dev);
+ 		input_free_device(step_cnt_input_dev);
++		input_free_device(meta_input_dev);
+ 		goto iRet_light_input_unreg_device;
+ 	}
+ 
+@@ -652,6 +719,7 @@
+ 		input_free_device(sig_motion_input_dev);
+ 		input_free_device(step_det_input_dev);
+ 		input_free_device(step_cnt_input_dev);
++		input_free_device(meta_input_dev);
+ 		goto iRet_proximity_input_unreg_device;
+ 	}
+ 
+@@ -662,6 +730,7 @@
+ 		input_free_device(sig_motion_input_dev);
+ 		input_free_device(step_det_input_dev);
+ 		input_free_device(step_cnt_input_dev);
++		input_free_device(meta_input_dev);
+ 		goto iRet_tmep_humi_input_unreg_device;
+ 	}
+ 
+@@ -671,6 +740,7 @@
+ 		input_free_device(sig_motion_input_dev);
+ 		input_free_device(step_det_input_dev);
+ 		input_free_device(step_cnt_input_dev);
++		input_free_device(meta_input_dev);
+ 		goto iRet_mag_input_unreg_device;
+ 	}
+ 
+@@ -679,6 +749,7 @@
+ 		input_free_device(sig_motion_input_dev);
+ 		input_free_device(step_det_input_dev);
+ 		input_free_device(step_cnt_input_dev);
++		input_free_device(meta_input_dev);
+ 		goto iRet_sig_motion_input_unreg_device;
+ 	}
+ 
+@@ -686,15 +757,23 @@
+ 	if (iRet < 0) {
+ 		input_free_device(step_det_input_dev);
+ 		input_free_device(step_cnt_input_dev);
++		input_free_device(meta_input_dev);
+ 		goto iRet_step_det_motion_input_unreg_device;
+ 	}
+ 
+ 	iRet = input_register_device(step_cnt_input_dev);
+ 	if (iRet < 0) {
+ 		input_free_device(step_cnt_input_dev);
++		input_free_device(meta_input_dev);
+ 		goto iRet_step_cnt_motion_input_unreg_device;
+ 	}
+ 
++	iRet = input_register_device(meta_input_dev);
++	if (iRet < 0) {
++		input_free_device(meta_input_dev);
++		goto iRet_meta_input_unreg_device;
++	}
++
+ 	data->acc_input_dev = acc_input_dev;
+ 	data->gyro_input_dev = gyro_input_dev;
+ 	data->pressure_input_dev = pressure_input_dev;
+@@ -706,8 +785,12 @@
+ 	data->sig_motion_input_dev = sig_motion_input_dev;
+ 	data->step_det_input_dev = step_det_input_dev;
+ 	data->step_cnt_input_dev = step_cnt_input_dev;
++	data->meta_input_dev = meta_input_dev;
+ 
+ 	return SUCCESS;
++
++iRet_meta_input_unreg_device:
++	input_unregister_device(step_cnt_input_dev);
+ iRet_step_cnt_motion_input_unreg_device:
+ 	input_unregister_device(step_det_input_dev);
+ iRet_step_det_motion_input_unreg_device:
+@@ -731,8 +814,9 @@
+ 	return ERROR;
+ iRet_acc_input_unreg_device:
+ 	pr_err("[SSP]: %s - could not register input device\n", __func__);
++	input_free_device(meta_input_dev);
++iRet_meta_input_free_device:
+ 	input_free_device(step_cnt_input_dev);
+-
+ iRet_step_cnt_input_free_device:
+ 	input_free_device(step_det_input_dev);
+ iRet_step_det_input_free_device:
+@@ -771,4 +855,5 @@
+ 	input_unregister_device(data->sig_motion_input_dev);
+ 	input_unregister_device(data->step_det_input_dev);
+ 	input_unregister_device(data->step_cnt_input_dev);
++	input_unregister_device(data->meta_input_dev);
+ }
+diff -X dontdiff -Nuarb a/drivers/sensorhub/atmel/ssp_sysfs.c b/drivers/sensorhub/atmel/ssp_sysfs.c
+--- a/drivers/sensorhub/atmel/ssp_sysfs.c	2016-01-06 15:00:43.064590570 -0500
++++ b/drivers/sensorhub/atmel/ssp_sysfs.c	2015-12-01 05:56:44.000000000 -0500
+@@ -20,45 +20,41 @@
+ 
+ unsigned int get_msdelay(int64_t dDelayRate)
+ {
+-	if (dDelayRate <= SENSOR_NS_DELAY_FASTEST)
+-		return SENSOR_MS_DELAY_FASTEST;
+-	else if (dDelayRate <= SENSOR_NS_DELAY_GAME)
+-		return SENSOR_MS_DELAY_GAME;
+-	else if (dDelayRate <= SENSOR_NS_DELAY_UI)
++	if (dDelayRate >= SENSOR_NS_DELAY_NORMAL)
++		return SENSOR_MS_DELAY_NORMAL;
++	else if (dDelayRate >= SENSOR_NS_DELAY_UI)
+ 		return SENSOR_MS_DELAY_UI;
++	else if (dDelayRate >= SENSOR_NS_DELAY_GAME)
++		return SENSOR_MS_DELAY_GAME;
+ 	else
+-		return SENSOR_MS_DELAY_NORMAL;
++		return SENSOR_MS_DELAY_FASTEST;
+ }
+ 
++
+ unsigned int get_delay_cmd(u8 uDelayRate)
+ {
+-	if (uDelayRate <= SENSOR_MS_DELAY_FASTEST)
+-		return SENSOR_CMD_DELAY_FASTEST;
+-	else if (uDelayRate <= SENSOR_MS_DELAY_GAME)
+-		return SENSOR_CMD_DELAY_GAME;
+-	else if (uDelayRate <= SENSOR_MS_DELAY_UI)
++	if (uDelayRate >= SENSOR_MS_DELAY_NORMAL)
++		return SENSOR_CMD_DELAY_NORMAL;
++	else if (uDelayRate >= SENSOR_MS_DELAY_UI)
+ 		return SENSOR_CMD_DELAY_UI;
++	else if (uDelayRate >= SENSOR_MS_DELAY_GAME)
++		return SENSOR_CMD_DELAY_GAME;
+ 	else
+-		return SENSOR_CMD_DELAY_NORMAL;
++		return SENSOR_CMD_DELAY_FASTEST;
+ }
+ 
+-static void change_sensor_delay(struct ssp_data *data,
++static void enable_sensor(struct ssp_data *data,
+ 	int iSensorType, int64_t dNewDelay)
+ {
+ 	u8 uBuf[2];
+ 	unsigned int uNewEnable = 0;
+ 	int64_t dTempDelay = data->adDelayBuf[iSensorType];
+ 
+-	if (!(atomic_read(&data->aSensorEnable) & (1 << iSensorType))) {
+-		data->aiCheckStatus[iSensorType] = NO_SENSOR_STATE;
+-		return;
+-	}
+-
+ 	data->adDelayBuf[iSensorType] = dNewDelay;
+ 
+ 	switch (data->aiCheckStatus[iSensorType]) {
+ 	case ADD_SENSOR_STATE:
+-		ssp_dbg("[SSP]: %s - add %u, New = %lldns\n",
++		pr_info("[SSP]: %s - add %u, New = %lldns\n",
+ 			 __func__, 1 << iSensorType, dNewDelay);
+ 
+ 		uBuf[1] = (u8)get_msdelay(dNewDelay);
+@@ -91,7 +87,7 @@
+ 			== get_msdelay(data->adDelayBuf[iSensorType]))
+ 			break;
+ 
+-		ssp_dbg("[SSP]: %s - Change %u, New = %lldns\n",
++		pr_info("[SSP]: %s - Change %u, New = %lldns\n",
+ 			__func__, 1 << iSensorType, dNewDelay);
+ 
+ 		uBuf[1] = (u8)get_msdelay(dNewDelay);
+@@ -100,10 +96,38 @@
+ 
+ 		break;
+ 	default:
+-		data->aiCheckStatus[iSensorType] = ADD_SENSOR_STATE;
++		break;
++/*		data->aiCheckStatus[iSensorType] = ADD_SENSOR_STATE;*/
+ 	}
+ }
+ 
++static void change_sensor_delay(struct ssp_data *data,
++	int iSensorType, int64_t dNewDelay)
++{
++	u8 uBuf[2];
++	int64_t dTempDelay = data->adDelayBuf[iSensorType];
++
++	data->adDelayBuf[iSensorType] = dNewDelay;
++
++	switch (data->aiCheckStatus[iSensorType]) {
++		case RUNNING_SENSOR_STATE:
++			if (get_msdelay(dTempDelay)
++				== get_msdelay(data->adDelayBuf[iSensorType]))
++				break;
++
++			pr_info("[SSP]: %s - Change %u, New = %lldns\n",
++				__func__, 1 << iSensorType, dNewDelay);
++
++			uBuf[1] = (u8)get_msdelay(dNewDelay);
++			uBuf[0] = (u8)get_delay_cmd(uBuf[1]);
++			send_instruction(data, CHANGE_DELAY, iSensorType, uBuf, 2);
++			break;
++		default:
++			break;
++	}
++}
++
++
+ /*************************************************************************/
+ /* SSP data enable function                                              */
+ /*************************************************************************/
+@@ -254,6 +278,7 @@
+ 					}
+ 				}
+ 				data->aiCheckStatus[uChangedSensor] = ADD_SENSOR_STATE;
++				enable_sensor(data, uChangedSensor, data->adDelayBuf[uChangedSensor]);
+ 			}
+ 			break;
+ 		}
+@@ -263,6 +288,26 @@
+ 	return size;
+ }
+ 
++static ssize_t set_flush(struct device *dev,
++	struct device_attribute *attr, const char *buf, size_t size)
++{
++	int64_t dTemp;
++	u8 sensor_type = 0;
++	struct ssp_data *data = dev_get_drvdata(dev);
++
++	if (kstrtoll(buf, 10, &dTemp) < 0)
++		return -EINVAL;
++
++	sensor_type = (u8)dTemp;
++
++	input_report_rel(data->meta_input_dev, REL_DIAL, META_DATA_FLUSH_COMPLETE);
++	input_report_rel(data->meta_input_dev, REL_HWHEEL, sensor_type + 1);
++	input_sync(data->meta_input_dev);
++
++	pr_info("[SSP] flush %d", sensor_type);
++	return size;
++}
++
+ static ssize_t show_acc_delay(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+@@ -521,6 +566,7 @@
+ 	show_sensors_enable, set_sensors_enable);
+ static DEVICE_ATTR(enable_irq, S_IRUGO | S_IWUSR | S_IWGRP,
+ 	show_enable_irq, set_enable_irq);
++static DEVICE_ATTR(ssp_flush, S_IWUSR | S_IWGRP, NULL, set_flush);
+ 
+ static struct device_attribute dev_attr_accel_poll_delay
+ 	= __ATTR(poll_delay, S_IRUGO | S_IWUSR | S_IWGRP,
+@@ -567,6 +613,7 @@
+ 	&dev_attr_mcu_update_ums,
+ 	&dev_attr_mcu_sleep_test,
+ 	&dev_attr_enable_irq,
++	&dev_attr_ssp_flush,
+ 	NULL,
+ };
+ 
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/adpd142.c b/drivers/sensorhub/stm/adpd142.c
+--- a/drivers/sensorhub/stm/adpd142.c	2016-01-06 15:00:43.065590570 -0500
++++ b/drivers/sensorhub/stm/adpd142.c	2015-12-01 05:56:44.000000000 -0500
+@@ -521,7 +521,7 @@
+ 	old_fs = get_fs();
+ 	set_fs(KERNEL_DS);
+ 
+-	fpt_adpd = filp_open("/data/misc/adpd142_config.dcfg", O_RDONLY, 0666);
++	fpt_adpd = filp_open("/data/misc/adpd142_config.dcfg", O_RDONLY, 0);
+ 	if (IS_ERR(fpt_adpd)) {
+ 		ADPD142_dbg("unable to find de file %ld\n", PTR_ERR(fpt_adpd));
+ 		set_fs(old_fs);
+@@ -1129,7 +1129,7 @@
+ 	old_fs = get_fs();
+ 	set_fs(KERNEL_DS);
+ 
+-	osc_filp = filp_open(OSCILLATOR_TRIM_FILE_PATH, O_RDONLY, 0666);
++	osc_filp = filp_open(OSCILLATOR_TRIM_FILE_PATH, O_RDONLY, 0);
+ 	if (IS_ERR(osc_filp)) {
+ 		err = PTR_ERR(osc_filp);
+ 		if (err != -ENOENT)
+@@ -1174,7 +1174,7 @@
+ 	set_fs(KERNEL_DS);
+ 
+ 	osc_filp = filp_open(OSCILLATOR_TRIM_FILE_PATH,
+-			O_CREAT | O_TRUNC | O_WRONLY, 0666);
++			O_CREAT | O_TRUNC | O_WRONLY, 0660);
+ 	if (IS_ERR(osc_filp)) {
+ 		pr_err("adpd142_%s: Can't open oscillator trim file\n", __func__);
+ 		set_fs(old_fs);
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/factory/accel_mpu6500.c b/drivers/sensorhub/stm/factory/accel_mpu6500.c
+--- a/drivers/sensorhub/stm/factory/accel_mpu6500.c	2016-01-06 15:00:43.067590570 -0500
++++ b/drivers/sensorhub/stm/factory/accel_mpu6500.c	2015-12-01 05:56:44.000000000 -0500
+@@ -21,7 +21,11 @@
+ #define VENDOR		"INVENSENSE"
+ #define CHIP_ID		"MPU6500"
+ 
++#ifdef CONFIG_MACH_KACTIVELTE_KOR
++#define CALIBRATION_FILE_PATH	"/efs/FactoryApp/calibration_data"
++#else
+ #define CALIBRATION_FILE_PATH	"/efs/calibration_data"
++#endif
+ #define CALIBRATION_DATA_AMOUNT	20
+ 
+ static ssize_t accel_vendor_show(struct device *dev,
+@@ -45,7 +49,7 @@
+ 	old_fs = get_fs();
+ 	set_fs(KERNEL_DS);
+ 
+-	cal_filp = filp_open(CALIBRATION_FILE_PATH, O_RDONLY, 0666);
++	cal_filp = filp_open(CALIBRATION_FILE_PATH, O_RDONLY | O_NOFOLLOW | O_NONBLOCK, 0660);
+ 	if (IS_ERR(cal_filp)) {
+ 		set_fs(old_fs);
+ 		iRet = PTR_ERR(cal_filp);
+@@ -192,7 +196,7 @@
+ 	set_fs(KERNEL_DS);
+ 
+ 	cal_filp = filp_open(CALIBRATION_FILE_PATH,
+-			O_CREAT | O_TRUNC | O_WRONLY, 0666);
++			O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW | O_NONBLOCK, 0660);			
+ 	if (IS_ERR(cal_filp)) {
+ 		pr_err("[SSP]: %s - Can't open calibration file\n", __func__);
+ 		set_fs(old_fs);
+@@ -356,6 +360,46 @@
+ 		shift_ratio[1] / 10, shift_ratio[1] % 10,
+ 		shift_ratio[2] / 10, shift_ratio[2] % 10);
+ }
++static ssize_t accel_lowpassfilter_store(struct device *dev,
++	struct device_attribute *attr, const char *buf, size_t size)
++{
++	int iRet = 0, new_enable = 1;
++	struct ssp_data *data = dev_get_drvdata(dev);
++	struct ssp_msg *msg = kzalloc(sizeof(*msg), GFP_KERNEL);
++	if (msg == NULL) {
++		pr_err("[SSP] %s, failed to alloc memory\n", __func__);
++		goto exit;
++	}
++
++	if (sysfs_streq(buf, "1"))
++		new_enable = 1;
++	else if (sysfs_streq(buf, "0"))
++		new_enable = 0;
++	else
++		ssp_dbg("[SSP]: %s - invalid value!\n", __func__);
++
++	msg->cmd = MSG2SSP_AP_SENSOR_LPF;
++	msg->length = 1;
++	msg->options = AP2HUB_WRITE;
++	msg->buffer = (char*) kzalloc(1, GFP_KERNEL);
++	if (msg->buffer == NULL) {
++		pr_err("[SSP] %s, failed to alloc memory\n", __func__);
++		kfree(msg);
++		goto exit;
++	}
++
++	*msg->buffer = new_enable;
++	msg->free_buffer = 1;
++
++	iRet = ssp_spi_async(data, msg);
++	if (iRet != SUCCESS)
++		pr_err("[SSP] %s - fail %d\n", __func__, iRet);
++	else
++		pr_info("[SSP] %s - %d\n", __func__, new_enable);
++
++exit:
++	return size;
++}
+ static DEVICE_ATTR(name, S_IRUGO, accel_name_show, NULL);
+ static DEVICE_ATTR(vendor, S_IRUGO, accel_vendor_show, NULL);
+ static DEVICE_ATTR(calibration, S_IRUGO | S_IWUSR | S_IWGRP,
+@@ -364,6 +408,8 @@
+ static DEVICE_ATTR(reactive_alert, S_IRUGO | S_IWUSR | S_IWGRP,
+ 	accel_reactive_alert_show, accel_reactive_alert_store);
+ static DEVICE_ATTR(selftest, S_IRUGO, accel_hw_selftest_show, NULL);
++static DEVICE_ATTR(lowpassfilter, S_IWUSR | S_IWGRP,
++	NULL, accel_lowpassfilter_store);
+ 
+ static struct device_attribute *acc_attrs[] = {
+ 	&dev_attr_name,
+@@ -372,6 +418,7 @@
+ 	&dev_attr_raw_data,
+ 	&dev_attr_reactive_alert,
+ 	&dev_attr_selftest,
++	&dev_attr_lowpassfilter,
+ 	NULL,
+ };
+ 
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/factory/gyro_mpu6500.c b/drivers/sensorhub/stm/factory/gyro_mpu6500.c
+--- a/drivers/sensorhub/stm/factory/gyro_mpu6500.c	2016-01-06 15:00:43.068590570 -0500
++++ b/drivers/sensorhub/stm/factory/gyro_mpu6500.c	2015-12-01 05:56:44.000000000 -0500
+@@ -22,7 +22,11 @@
+ #define VENDOR		"INVENSENSE"
+ #define CHIP_ID		"MPU6500"
+ 
++#ifdef CONFIG_MACH_KACTIVELTE_KOR
++#define CALIBRATION_FILE_PATH	"/efs/FactoryApp/gyro_cal_data"
++#else
+ #define CALIBRATION_FILE_PATH	"/efs/gyro_cal_data"
++#endif
+ #define VERBOSE_OUT 1
+ #define CALIBRATION_DATA_AMOUNT	20
+ #define DEF_GYRO_FULLSCALE	2000
+@@ -56,7 +60,7 @@
+ 	old_fs = get_fs();
+ 	set_fs(KERNEL_DS);
+ 
+-	cal_filp = filp_open(CALIBRATION_FILE_PATH, O_RDONLY, 0666);
++	cal_filp = filp_open(CALIBRATION_FILE_PATH, O_RDONLY | O_NOFOLLOW | O_NONBLOCK, 0660);
+ 	if (IS_ERR(cal_filp)) {
+ 		set_fs(old_fs);
+ 		iRet = PTR_ERR(cal_filp);
+@@ -98,7 +102,7 @@
+ 	set_fs(KERNEL_DS);
+ 
+ 	cal_filp = filp_open(CALIBRATION_FILE_PATH,
+-			O_CREAT | O_TRUNC | O_WRONLY, 0666);
++			O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW | O_NONBLOCK, 0660);		
+ 	if (IS_ERR(cal_filp)) {
+ 		pr_err("[SSP]: %s - Can't open calibration file\n", __func__);
+ 		set_fs(old_fs);
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/factory/prox_max88920.c b/drivers/sensorhub/stm/factory/prox_max88920.c
+--- a/drivers/sensorhub/stm/factory/prox_max88920.c	2016-01-06 15:00:43.068590570 -0500
++++ b/drivers/sensorhub/stm/factory/prox_max88920.c	2015-12-01 05:56:44.000000000 -0500
+@@ -22,7 +22,11 @@
+ #define	CHIP_ID		"MAX88920"
+ #endif
+ 
++#ifdef CONFIG_MACH_KACTIVELTE_KOR
++#define CANCELATION_FILE_PATH	"/efs/FactoryApp/prox_cal"
++#else
+ #define CANCELATION_FILE_PATH	"/efs/prox_cal"
++#endif
+ #define LCD_LDI_FILE_PATH	"/sys/class/lcd/panel/window_type"
+ 
+ #define LINE_1		'4'
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/factory/temphumidity_shtc1.c b/drivers/sensorhub/stm/factory/temphumidity_shtc1.c
+--- a/drivers/sensorhub/stm/factory/temphumidity_shtc1.c	2016-01-06 15:00:43.068590570 -0500
++++ b/drivers/sensorhub/stm/factory/temphumidity_shtc1.c	2015-12-01 05:56:44.000000000 -0500
+@@ -46,6 +46,8 @@
+ #define MODEL_NAME	"SM-G900V"
+ #elif defined(CONFIG_MACH_KLTE_DCM)
+ #define MODEL_NAME	"SM-G900D"
++#elif defined(CONFIG_MACH_KACTIVELTE_DCM)
++#define MODEL_NAME	"SM-G870D"
+ #elif defined(CONFIG_MACH_KLTE_KDI)
+ #define MODEL_NAME	"SM-G900J"
+ #elif defined(CONFIG_MACH_KLTE_SBM)
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/max86900.c b/drivers/sensorhub/stm/max86900.c
+--- a/drivers/sensorhub/stm/max86900.c	2016-01-06 15:00:43.068590570 -0500
++++ b/drivers/sensorhub/stm/max86900.c	2015-12-01 05:56:44.000000000 -0500
+@@ -1035,20 +1035,19 @@
+ 	struct device_attribute *attr, const char *buf, size_t size)
+ {
+ 	struct max86900_device_data *data = dev_get_drvdata(dev);
++	int ret = 0;
+ 	u8 handle = 0;
+ 
+-	if (sysfs_streq(buf, "17")) /* ID_SAM_HRM */
+-		handle = 17;
+-	else if (sysfs_streq(buf, "18")) /* ID_AOSP_HRM */
+-		handle = 18;
+-	else if (sysfs_streq(buf, "19")) /* ID_HRM_RAW */
+-		handle = 19;
+-	else {
+-		pr_info("%s: invalid value %d\n", __func__, *buf);
+-		return -EINVAL;
++	ret = kstrtou8(buf, 10, &handle);
++	if (ret < 0) {
++		pr_err("%s - kstrtou8 failed.(%d)\n", __func__, ret);
++		return ret;
+ 	}
++	pr_info("%s - handle = %d\n", __func__, handle);
+ 
+ 	input_report_rel(data->hrm_input_dev, REL_MISC, handle);
++	input_sync(data->hrm_input_dev);
++
+ 	return size;
+ }
+ 
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/ssp_data.c b/drivers/sensorhub/stm/ssp_data.c
+--- a/drivers/sensorhub/stm/ssp_data.c	2016-01-06 15:00:43.068590570 -0500
++++ b/drivers/sensorhub/stm/ssp_data.c	2015-12-01 05:56:44.000000000 -0500
+@@ -33,11 +33,15 @@
+ 						int iSensorData, u64 timestamp)
+ {
+ 	u64 move_timestamp = data->lastTimestamp[iSensorData];
++	if ((iSensorData != PROXIMITY_SENSOR) && (iSensorData != GESTURE_SENSOR)
++		&& (iSensorData != STEP_DETECTOR) && (iSensorData != SIG_MOTION_SENSOR)
++		&& (iSensorData != STEP_COUNTER)) {
+ 	while ((move_timestamp * 10 + data->adDelayBuf[iSensorData] * 15) < (timestamp * 10)) {
+ 		move_timestamp += data->adDelayBuf[iSensorData];
+ 		sensorsdata->timestamp = move_timestamp;
+ 		data->report_sensor_data[iSensorData](data, sensorsdata);
+ 	}
++	}
+ }
+ 
+ static void get_timestamp(struct ssp_data *data, char *pchRcvDataFrame,
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/ssp_firmware.c b/drivers/sensorhub/stm/ssp_firmware.c
+--- a/drivers/sensorhub/stm/ssp_firmware.c	2016-01-06 15:00:43.069590570 -0500
++++ b/drivers/sensorhub/stm/ssp_firmware.c	2015-12-01 05:56:44.000000000 -0500
+@@ -14,8 +14,8 @@
+  */
+ #include "ssp.h"
+ 
+-#define SSP_FIRMWARE_REVISION_STM	14120100
+-#define SSP_FIRMWARE_REVISION_TASMAN	14061000
++#define SSP_FIRMWARE_REVISION_STM	15041500
++#define SSP_FIRMWARE_REVISION_TASMAN	14121000
+ #define SSP_FIRMWARE_REVISION_PATEK	14070700
+ 
+ #define BOOT_SPI_HZ	4800000
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/ssp.h b/drivers/sensorhub/stm/ssp.h
+--- a/drivers/sensorhub/stm/ssp.h	2016-01-06 15:00:43.068590570 -0500
++++ b/drivers/sensorhub/stm/ssp.h	2015-12-01 05:56:44.000000000 -0500
+@@ -214,6 +214,7 @@
+ #define MSG2SSP_AP_MOBEAM_COUNT_SET		0x33
+ #define MSG2SSP_AP_MOBEAM_START			0x34
+ #define MSG2SSP_AP_MOBEAM_STOP			0x35
++#define MSG2SSP_AP_SENSOR_LPF			0x37
+ 
+ #define MSG2SSP_AP_FUSEROM			0X01
+ 
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/ssp_input.c b/drivers/sensorhub/stm/ssp_input.c
+--- a/drivers/sensorhub/stm/ssp_input.c	2016-01-06 15:00:43.069590570 -0500
++++ b/drivers/sensorhub/stm/ssp_input.c	2015-12-01 05:56:44.000000000 -0500
+@@ -427,8 +427,8 @@
+ 	data->buf[PROXIMITY_SENSOR].prox[0] = proxdata->prox[0];
+ 	data->buf[PROXIMITY_SENSOR].prox[1] = proxdata->prox[1];
+ 
+-	input_report_abs(data->prox_input_dev, ABS_DISTANCE,
+-		(!proxdata->prox[0]));
++	input_report_rel(data->prox_input_dev, REL_DIAL,
++		(!proxdata->prox[0]) + 1);
+ 	input_sync(data->prox_input_dev);
+ 
+ 	wake_lock_timeout(&data->ssp_wake_lock, 3 * HZ);
+@@ -1104,8 +1104,7 @@
+ 	input_set_capability(light_input_dev, EV_REL, REL_RY);
+ 	input_set_capability(light_input_dev, EV_REL, REL_RZ);
+ 
+-	input_set_capability(prox_input_dev, EV_ABS, ABS_DISTANCE);
+-	input_set_abs_params(prox_input_dev, ABS_DISTANCE, 0, 1, 0, 0);
++	input_set_capability(prox_input_dev, EV_REL, REL_DIAL);
+ 
+ 	input_set_capability(temp_humi_input_dev, EV_REL, REL_HWHEEL);
+ 	input_set_capability(temp_humi_input_dev, EV_REL, REL_DIAL);
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm/ssp_sensorhub.c b/drivers/sensorhub/stm/ssp_sensorhub.c
+--- a/drivers/sensorhub/stm/ssp_sensorhub.c	2016-01-06 15:00:43.069590570 -0500
++++ b/drivers/sensorhub/stm/ssp_sensorhub.c	2015-12-01 05:56:44.000000000 -0500
+@@ -151,39 +151,58 @@
+ 		= container_of(file->private_data,
+ 			struct ssp_sensorhub_data, sensorhub_device);
+ 	int ret = 0;
++	char *buffer;
+ 
+ 	if (unlikely(count < 2)) {
+-		sensorhub_err("library data length err(%d)", count);
++		sensorhub_err("library data length err(%d)", (int)count);
+ 		return -EINVAL;
+ 	}
+ 
+-	ssp_sensorhub_log(__func__, buf, count);
++	buffer = kzalloc(count * sizeof(char), GFP_KERNEL);
++	if (unlikely(!buffer)) {
++		sensorhub_err("allocate memory for kernel buffer err");
++		return -ENOMEM;
++	}
++
++	ret = copy_from_user(buffer, buf, count);
++	if (unlikely(ret)) {
++		sensorhub_err("memcpy for kernel buffer err");
++		ret = -EFAULT;
++		goto exit;
++	}
++
++	ssp_sensorhub_log(__func__, buffer, count);
+ 
+ 	if (unlikely(hub_data->ssp_data->bSspShutdown)) {
+ 		sensorhub_err("stop sending library data(shutdown)");
+-		return -EBUSY;
++		ret = -EBUSY;
++		goto exit;
+ 	}
+ 
+-	if (buf[0] == MSG2SSP_INST_LIB_DATA && count >= BIG_DATA_SIZE)
+-		ret = ssp_sensorhub_send_big_data(hub_data, buf, count);
+-	else if (buf[0] == MSG2SSP_INST_LIB_NOTI)
+-		ret = ssp_sensorhub_send_cmd(hub_data, buf, count);
++	if (buffer[0] == MSG2SSP_INST_LIB_DATA && count >= BIG_DATA_SIZE)
++		ret = ssp_sensorhub_send_big_data(hub_data, buffer, count);
++	else if (buffer[0] == MSG2SSP_INST_LIB_NOTI)
++		ret = ssp_sensorhub_send_cmd(hub_data, buffer, count);
+ 	else
+-		ret = ssp_sensorhub_send_instruction(hub_data, buf, count);
++		ret = ssp_sensorhub_send_instruction(hub_data, buffer, count);
+ 
+ 	if (unlikely(ret <= 0)) {
+ 		sensorhub_err("send library data err(%d)", ret);
+ 		/* i2c transfer fail */
+ 		if (ret == ERROR)
+-			return -EIO;
++			ret = -EIO;
+ 		/* i2c transfer done but no ack from MCU */
+ 		else if (ret == FAIL)
+-			return -EAGAIN;
+-		else
+-			return ret;
++			ret = -EAGAIN;
++
++		goto exit;
+ 	}
+ 
+-	return count;
++	ret = count;
++
++exit:
++	kfree(buffer);
++	return ret;
+ }
+ 
+ static ssize_t ssp_sensorhub_read(struct file *file, char __user *buf,
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm32f/factory/temphumidity_shtc1.c b/drivers/sensorhub/stm32f/factory/temphumidity_shtc1.c
+--- a/drivers/sensorhub/stm32f/factory/temphumidity_shtc1.c	2016-01-06 15:00:43.071590570 -0500
++++ b/drivers/sensorhub/stm32f/factory/temphumidity_shtc1.c	2015-12-01 05:56:44.000000000 -0500
+@@ -36,10 +36,10 @@
+ #define MODEL_NAME	"GT-I9508V"
+ #elif defined (CONFIG_MACH_HLTEATT)
+ #define MODEL_NAME	"SM-N900A"
+-#elif defined (CONFIG_MACH_HLTE_CHN_CMCC)
+-#define MODEL_NAME	"SM-N9008V"
+ #elif defined (CONFIG_MACH_HLTE_CHN_TDOPEN)
+ #define MODEL_NAME	"SM-N9008S"
++#elif defined (CONFIG_MACH_HLTE_CHN_CMCC)
++#define MODEL_NAME	"SM-N9008V"
+ #elif defined (CONFIG_MACH_H3GDUOS_CTC)
+ #define MODEL_NAME	"SM-N9009"
+ #elif defined (CONFIG_MACH_H3GDUOS_CU)
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm32f/ssp_firmware.c b/drivers/sensorhub/stm32f/ssp_firmware.c
+--- a/drivers/sensorhub/stm32f/ssp_firmware.c	2016-01-06 15:00:43.071590570 -0500
++++ b/drivers/sensorhub/stm32f/ssp_firmware.c	2015-12-01 05:56:45.000000000 -0500
+@@ -18,11 +18,11 @@
+ #ifdef CONFIG_SENSORS_SSP_BOUNCE_FIRMWARE
+ #define SSP_FIRMWARE_REVISION_STM	14010300 /* Latest, 88922*/
+ #else
+-#define SSP_FIRMWARE_REVISION_STM	14111800 /* Latest, 88922*/
++#define SSP_FIRMWARE_REVISION_STM	15041500 /* Latest, 88922*/
+ #endif
+ #define SSP_FIRMWARE_REVISION_STM_88921	13072401 /* 88921 */
+ #define SSP_FIRMWARE_REVISION_STM_RVS	13051500
+-#define SSP_FIRMWARE_REVISION_JSGLTE	14070300
++#define SSP_FIRMWARE_REVISION_JSGLTE	15013000
+ 
+ #define BOOT_SPI_HZ	960000
+ #define NORM_SPI_HZ	4800000
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm32f/ssp_input.c b/drivers/sensorhub/stm32f/ssp_input.c
+--- a/drivers/sensorhub/stm32f/ssp_input.c	2016-01-06 15:00:43.071590570 -0500
++++ b/drivers/sensorhub/stm32f/ssp_input.c	2015-12-01 05:56:45.000000000 -0500
+@@ -427,8 +427,8 @@
+ 	data->buf[PROXIMITY_SENSOR].prox[0] = proxdata->prox[0];
+ 	data->buf[PROXIMITY_SENSOR].prox[1] = proxdata->prox[1];
+ 
+-	input_report_abs(data->prox_input_dev, ABS_DISTANCE,
+-		(!proxdata->prox[0]));
++	input_report_rel(data->prox_input_dev, REL_DIAL,
++		(!proxdata->prox[0]) + 1);
+ 	input_sync(data->prox_input_dev);
+ 
+ 	wake_lock_timeout(&data->ssp_wake_lock, 3 * HZ);
+@@ -1119,8 +1119,7 @@
+ #endif
+ 
+ 
+-	input_set_capability(prox_input_dev, EV_ABS, ABS_DISTANCE);
+-	input_set_abs_params(prox_input_dev, ABS_DISTANCE, 0, 1, 0, 0);
++	input_set_capability(prox_input_dev, EV_REL, REL_DIAL);
+ 
+ 	input_set_capability(temp_humi_input_dev, EV_REL, REL_HWHEEL);
+ 	input_set_capability(temp_humi_input_dev, EV_REL, REL_DIAL);
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm32f/ssp_sysfs.c b/drivers/sensorhub/stm32f/ssp_sysfs.c
+--- a/drivers/sensorhub/stm32f/ssp_sysfs.c	2016-01-06 15:00:43.072590570 -0500
++++ b/drivers/sensorhub/stm32f/ssp_sysfs.c	2015-12-01 05:56:45.000000000 -0500
+@@ -89,7 +89,8 @@
+ 		if (iSensorType == PROXIMITY_SENSOR) {
+ 			proximity_open_lcd_ldi(data);
+ 			proximity_open_calibration(data);
+-
++			set_proximity_threshold(data, data->uProxHiThresh,
++				data->uProxLoThresh);
+ 		}
+ 		break;
+ 	case RUNNING_SENSOR_STATE:
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm_hestia/adpd142.c b/drivers/sensorhub/stm_hestia/adpd142.c
+--- a/drivers/sensorhub/stm_hestia/adpd142.c	2016-01-06 15:00:43.072590570 -0500
++++ b/drivers/sensorhub/stm_hestia/adpd142.c	2015-12-01 05:56:45.000000000 -0500
+@@ -521,7 +521,7 @@
+ 	old_fs = get_fs();
+ 	set_fs(KERNEL_DS);
+ 
+-	fpt_adpd = filp_open("/data/misc/adpd142_config.dcfg", O_RDONLY, 0666);
++	fpt_adpd = filp_open("/data/misc/adpd142_config.dcfg", O_RDONLY, 0);
+ 	if (IS_ERR(fpt_adpd)) {
+ 		ADPD142_dbg("unable to find de file %ld\n", PTR_ERR(fpt_adpd));
+ 		set_fs(old_fs);
+@@ -1129,7 +1129,7 @@
+ 	old_fs = get_fs();
+ 	set_fs(KERNEL_DS);
+ 
+-	osc_filp = filp_open(OSCILLATOR_TRIM_FILE_PATH, O_RDONLY, 0666);
++	osc_filp = filp_open(OSCILLATOR_TRIM_FILE_PATH, O_RDONLY, 0);
+ 	if (IS_ERR(osc_filp)) {
+ 		err = PTR_ERR(osc_filp);
+ 		if (err != -ENOENT)
+@@ -1174,7 +1174,7 @@
+ 	set_fs(KERNEL_DS);
+ 
+ 	osc_filp = filp_open(OSCILLATOR_TRIM_FILE_PATH,
+-			O_CREAT | O_TRUNC | O_WRONLY, 0666);
++			O_CREAT | O_TRUNC | O_WRONLY, 0660);
+ 	if (IS_ERR(osc_filp)) {
+ 		pr_err("adpd142_%s: Can't open oscillator trim file\n", __func__);
+ 		set_fs(old_fs);
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm_patek/adpd142.c b/drivers/sensorhub/stm_patek/adpd142.c
+--- a/drivers/sensorhub/stm_patek/adpd142.c	2016-01-06 15:00:43.074590570 -0500
++++ b/drivers/sensorhub/stm_patek/adpd142.c	2015-12-01 05:56:45.000000000 -0500
+@@ -521,7 +521,7 @@
+ 	old_fs = get_fs();
+ 	set_fs(KERNEL_DS);
+ 
+-	fpt_adpd = filp_open("/data/misc/adpd142_config.dcfg", O_RDONLY, 0666);
++	fpt_adpd = filp_open("/data/misc/adpd142_config.dcfg", O_RDONLY, 0);
+ 	if (IS_ERR(fpt_adpd)) {
+ 		ADPD142_dbg("unable to find de file %ld\n", PTR_ERR(fpt_adpd));
+ 		set_fs(old_fs);
+@@ -1129,7 +1129,7 @@
+ 	old_fs = get_fs();
+ 	set_fs(KERNEL_DS);
+ 
+-	osc_filp = filp_open(OSCILLATOR_TRIM_FILE_PATH, O_RDONLY, 0666);
++	osc_filp = filp_open(OSCILLATOR_TRIM_FILE_PATH, O_RDONLY, 0);
+ 	if (IS_ERR(osc_filp)) {
+ 		err = PTR_ERR(osc_filp);
+ 		if (err != -ENOENT)
+@@ -1174,7 +1174,7 @@
+ 	set_fs(KERNEL_DS);
+ 
+ 	osc_filp = filp_open(OSCILLATOR_TRIM_FILE_PATH,
+-			O_CREAT | O_TRUNC | O_WRONLY, 0666);
++			O_CREAT | O_TRUNC | O_WRONLY, 0660);
+ 	if (IS_ERR(osc_filp)) {
+ 		pr_err("adpd142_%s: Can't open oscillator trim file\n", __func__);
+ 		set_fs(old_fs);
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm_patek/ssp_input.c b/drivers/sensorhub/stm_patek/ssp_input.c
+--- a/drivers/sensorhub/stm_patek/ssp_input.c	2016-01-06 15:00:43.075590571 -0500
++++ b/drivers/sensorhub/stm_patek/ssp_input.c	2015-12-01 05:56:46.000000000 -0500
+@@ -421,8 +421,8 @@
+ 	data->buf[PROXIMITY_SENSOR].prox[0] = proxdata->prox[0];
+ 	data->buf[PROXIMITY_SENSOR].prox[1] = proxdata->prox[1];
+ 
+-	input_report_abs(data->prox_input_dev, ABS_DISTANCE,
+-		(!proxdata->prox[0]));
++	input_report_rel(data->prox_input_dev, REL_DIAL,
++		(!proxdata->prox[0]) + 1);
+ 	input_sync(data->prox_input_dev);
+ 
+ 	wake_lock_timeout(&data->ssp_wake_lock, 3 * HZ);
+@@ -1026,8 +1026,7 @@
+ 	input_set_capability(light_input_dev, EV_REL, REL_RY);
+ 	input_set_capability(light_input_dev, EV_REL, REL_RZ);
+ 
+-	input_set_capability(prox_input_dev, EV_ABS, ABS_DISTANCE);
+-	input_set_abs_params(prox_input_dev, ABS_DISTANCE, 0, 1, 0, 0);
++	input_set_capability(prox_input_dev, EV_REL, REL_DIAL);
+ 
+ 	input_set_capability(temp_humi_input_dev, EV_REL, REL_HWHEEL);
+ 	input_set_capability(temp_humi_input_dev, EV_REL, REL_DIAL);
+diff -X dontdiff -Nuarb a/drivers/sensorhub/stm_patek/ssp_sysfs.c b/drivers/sensorhub/stm_patek/ssp_sysfs.c
+--- a/drivers/sensorhub/stm_patek/ssp_sysfs.c	2016-01-06 15:00:43.075590571 -0500
++++ b/drivers/sensorhub/stm_patek/ssp_sysfs.c	2015-12-01 05:56:46.000000000 -0500
+@@ -80,9 +80,6 @@
+ 			proximity_open_lcd_ldi(data);
+ 			proximity_open_calibration(data);
+ 			set_proximity_threshold(data, data->uProxHiThresh, data->uProxLoThresh);
+-
+-			input_report_abs(data->prox_input_dev, ABS_DISTANCE, 1);
+-			input_sync(data->prox_input_dev);
+ 		}
+ #ifdef CONFIG_DUAL_LCD
+ 		else if ((iSensorType == GEOMAGNETIC_SENSOR)\
+diff -X dontdiff -Nuarb a/drivers/staging/iio/imu/inv_mpu/inv_mpu_core.c b/drivers/staging/iio/imu/inv_mpu/inv_mpu_core.c
+--- a/drivers/staging/iio/imu/inv_mpu/inv_mpu_core.c	2016-01-06 15:00:43.141590574 -0500
++++ b/drivers/staging/iio/imu/inv_mpu/inv_mpu_core.c	2015-12-01 05:57:00.000000000 -0500
+@@ -29,9 +29,6 @@
+ #include <linux/spinlock.h>
+ #include <linux/of_gpio.h>
+ #include <linux/regulator/consumer.h>
+-#if defined(CONFIG_INV_MPU_IIO_MPL)
+-#include <linux/sensor/mpu.h>
+-#endif
+ 
+ #include "inv_mpu_iio.h"
+ #include "sysfs.h"
+@@ -47,11 +44,10 @@
+ #define VENDOR_NAME	"INVENSENSE"
+ #endif
+ 
+-
+ s64 get_time_ns(void)
+ {
+ 	struct timespec ts;
+-	ktime_get_ts(&ts);
++	ts = ktime_to_timespec(ktime_get_boottime());
+ 	return timespec_to_ns(&ts);
+ }
+ 
+@@ -221,10 +217,9 @@
+ 	set_fs(KERNEL_DS);
+ 
+ #ifdef CONFIG_SEC_LOCALE_KOR_FRESCO
+-	pr_err("%d\n", chip_ver);
++	pr_info("%d\n", chip_ver);
+ #endif
+-	cal_filp = filp_open(MPU6500_ACCEL_CAL_PATH,
+-		O_RDONLY, S_IRUGO | S_IWUSR | S_IWGRP);
++	cal_filp = filp_open(MPU6500_ACCEL_CAL_PATH, O_RDONLY, 0);
+ 	if (IS_ERR(cal_filp)) {
+ 		pr_err("%s: Can't open calibration file\n", __func__);
+ 		set_fs(old_fs);
+@@ -254,7 +249,7 @@
+ static int inv_switch_engine(struct inv_mpu_state *st, bool en, u32 mask)
+ {
+ 	struct inv_reg_map_s *reg;
+-	u8 data, mgmt_1;
++	u8 data, mgmt_1 = 0;
+ 	int result;
+ 
+ 	reg = &st->reg;
+@@ -273,8 +268,7 @@
+ 		/* turning off gyro requires switch to internal clock first.
+ 		   Then turn off gyro engine */
+ 		mgmt_1 |= INV_CLK_INTERNAL;
+-		result = inv_i2c_single_write(st, reg->pwr_mgmt_1,
+-						mgmt_1);
++		result = inv_i2c_single_write(st, reg->pwr_mgmt_1, mgmt_1);
+ 		if (result)
+ 			return result;
+ 	}
+@@ -295,8 +289,7 @@
+ 		msleep(SENSOR_UP_TIME);
+ 		/* after gyro is on & stable, switch internal clock to PLL */
+ 		mgmt_1 |= INV_CLK_PLL;
+-		result = inv_i2c_single_write(st, reg->pwr_mgmt_1,
+-						mgmt_1);
++		result = inv_i2c_single_write(st, reg->pwr_mgmt_1, mgmt_1);
+ 		if (result)
+ 			return result;
+ 	}
+@@ -348,7 +341,8 @@
+ 		result = inv_i2c_single_write(st, reg->pwr_mgmt_1, data);
+ 	} else {
+ 		if (power_on)
+-			result = inv_i2c_single_write(st, reg->pwr_mgmt_1, data);
++			result = inv_i2c_single_write(st, reg->pwr_mgmt_1,
++				data);
+ 		else
+ 			result = 0;
+ 	}
+@@ -414,7 +408,8 @@
+ 		if (result)
+ 			return result;
+ 
+-		result = inv_i2c_single_write(st, reg->accel_config2,INV_FILTER_42HZ);
++		result = inv_i2c_single_write(st, reg->accel_config2,
++			INV_FILTER_42HZ);
+ 		if (result)
+ 			return result;
+ 
+@@ -619,16 +614,15 @@
+ 			data = 0;
+ 		else
+ 			inv_i2c_read(st, ii, 1, &data);
+-		bytes_printed += sprintf(buf + bytes_printed, "%#2x: %#2x\n",
+-					 ii, data);
++		bytes_printed += snprintf(buf + bytes_printed, PAGE_SIZE,
++			"%#2x: %#2x\n", ii, data);
+ 	}
+ 	mutex_unlock(&indio_dev->mlock);
+ 
+ 	return bytes_printed;
+ }
+ 
+-int write_be32_key_to_mem(struct inv_mpu_state *st,
+-					u32 data, int key)
++int write_be32_key_to_mem(struct inv_mpu_state *st, u32 data, int key)
+ {
+ 	cpu_to_be32s(&data);
+ 	return mem_w_key(key, sizeof(data), (u8 *)&data);
+@@ -1120,7 +1114,7 @@
+ 	mutex_unlock(&indio_dev->mlock);
+ 	if (result)
+ 		return -EINVAL;
+-	return sprintf(buf, "%lld\n", tmp);
++	return snprintf(buf, PAGE_SIZE, "%lld\n", tmp);
+ }
+ 
+ static ssize_t inv_attr64_store(struct device *dev,
+@@ -1188,169 +1182,209 @@
+ 	{
+ 		const s16 gyro_scale[] = {250, 500, 1000, 2000};
+ 
+-		return sprintf(buf, "%d\n", gyro_scale[st->chip_config.fsr]);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			gyro_scale[st->chip_config.fsr]);
+ 	}
+ 	case ATTR_ACCEL_SCALE:
+ 	{
+ 		const s16 accel_scale[] = {2, 4, 8, 16};
+-		return sprintf(buf, "%d\n",
++		return snprintf(buf, PAGE_SIZE, "%d\n",
+ 					accel_scale[st->chip_config.accel_fs] *
+ 					st->chip_info.multi);
+ 	}
+ 	case ATTR_COMPASS_SCALE:
+ 		st->slave_compass->get_scale(st, &result);
+ 
+-		return sprintf(buf, "%d\n", result);
++		return snprintf(buf, PAGE_SIZE, "%d\n", result);
+ 	case ATTR_ACCEL_X_CALIBBIAS:
+ 	case ATTR_ACCEL_Y_CALIBBIAS:
+ 	case ATTR_ACCEL_Z_CALIBBIAS:
+ 		axis = this_attr->address - ATTR_ACCEL_X_CALIBBIAS;
+-		return sprintf(buf, "%d\n", st->accel_bias[axis] *
+-						st->chip_info.multi);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->accel_bias[axis] * st->chip_info.multi);
+ 	case ATTR_GYRO_X_CALIBBIAS:
+ 	case ATTR_GYRO_Y_CALIBBIAS:
+ 	case ATTR_GYRO_Z_CALIBBIAS:
+ 		axis = this_attr->address - ATTR_GYRO_X_CALIBBIAS;
+-		return sprintf(buf, "%d\n", st->gyro_bias[axis]);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->gyro_bias[axis]);
+ 	case ATTR_SELF_TEST_GYRO_SCALE:
+-		return sprintf(buf, "%d\n", SELF_TEST_GYRO_FULL_SCALE);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			SELF_TEST_GYRO_FULL_SCALE);
+ 	case ATTR_SELF_TEST_ACCEL_SCALE:
+ 		if (INV_MPU6500 == st->chip_type)
+-			return sprintf(buf, "%d\n", SELF_TEST_ACCEL_6500_SCALE);
++			return snprintf(buf, PAGE_SIZE, "%d\n",
++				SELF_TEST_ACCEL_6500_SCALE);
+ 		else
+-			return sprintf(buf, "%d\n", SELF_TEST_ACCEL_FULL_SCALE);
++			return snprintf(buf, PAGE_SIZE, "%d\n",
++				SELF_TEST_ACCEL_FULL_SCALE);
+ 	case ATTR_GYRO_X_OFFSET:
+ 	case ATTR_GYRO_Y_OFFSET:
+ 	case ATTR_GYRO_Z_OFFSET:
+ 		axis = this_attr->address - ATTR_GYRO_X_OFFSET;
+-		return sprintf(buf, "%d\n", st->input_gyro_offset[axis]);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->input_gyro_offset[axis]);
+ 	case ATTR_ACCEL_X_OFFSET:
+ 	case ATTR_ACCEL_Y_OFFSET:
+ 	case ATTR_ACCEL_Z_OFFSET:
+ 		axis = this_attr->address - ATTR_ACCEL_X_OFFSET;
+-		return sprintf(buf, "%d\n", st->input_accel_offset[axis]);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->input_accel_offset[axis]);
+ 	case ATTR_DMP_ACCEL_X_DMP_BIAS:
+-		return sprintf(buf, "%d\n", st->input_accel_dmp_bias[0]);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->input_accel_dmp_bias[0]);
+ 	case ATTR_DMP_ACCEL_Y_DMP_BIAS:
+-		return sprintf(buf, "%d\n", st->input_accel_dmp_bias[1]);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->input_accel_dmp_bias[1]);
+ 	case ATTR_DMP_ACCEL_Z_DMP_BIAS:
+-		return sprintf(buf, "%d\n", st->input_accel_dmp_bias[2]);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->input_accel_dmp_bias[2]);
+ 	case ATTR_DMP_GYRO_X_DMP_BIAS:
+-		return sprintf(buf, "%d\n", st->input_gyro_dmp_bias[0]);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->input_gyro_dmp_bias[0]);
+ 	case ATTR_DMP_GYRO_Y_DMP_BIAS:
+-		return sprintf(buf, "%d\n", st->input_gyro_dmp_bias[1]);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->input_gyro_dmp_bias[1]);
+ 	case ATTR_DMP_GYRO_Z_DMP_BIAS:
+-		return sprintf(buf, "%d\n", st->input_gyro_dmp_bias[2]);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->input_gyro_dmp_bias[2]);
+ 	case ATTR_DMP_PED_INT_ON:
+-		return sprintf(buf, "%d\n", st->ped.int_on);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->ped.int_on);
+ 	case ATTR_DMP_PED_ON:
+-		return sprintf(buf, "%d\n", st->ped.on);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->ped.on);
+ 	case ATTR_DMP_PED_STEP_THRESH:
+-		return sprintf(buf, "%d\n", st->ped.step_thresh);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->ped.step_thresh);
+ 	case ATTR_DMP_PED_INT_THRESH:
+-		return sprintf(buf, "%d\n", st->ped.int_thresh);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->ped.int_thresh);
+ 	case ATTR_DMP_SMD_ENABLE:
+-		return sprintf(buf, "%d\n", st->chip_config.smd_enable);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->chip_config.smd_enable);
+ 	case ATTR_DMP_SMD_THLD:
+-		return sprintf(buf, "%d\n", st->smd.threshold);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->smd.threshold);
+ 	case ATTR_DMP_SMD_DELAY_THLD:
+-		return sprintf(buf, "%d\n", st->smd.delay);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->smd.delay);
+ 	case ATTR_DMP_SMD_DELAY_THLD2:
+-		return sprintf(buf, "%d\n", st->smd.delay2);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->smd.delay2);
+ 	case ATTR_DMP_TAP_ON:
+-		return sprintf(buf, "%d\n", st->tap.on);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->tap.on);
+ 	case ATTR_DMP_TAP_THRESHOLD:
+-		return sprintf(buf, "%d\n", st->tap.thresh);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->tap.thresh);
+ 	case ATTR_DMP_TAP_MIN_COUNT:
+-		return sprintf(buf, "%d\n", st->tap.min_count);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->tap.min_count);
+ 	case ATTR_DMP_TAP_TIME:
+-		return sprintf(buf, "%d\n", st->tap.time);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->tap.time);
+ 	case ATTR_DMP_LCD_POS_ENABLE:
+-		return sprintf(buf, "%d\n", st->lcd_pos.en);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->lcd_pos.en);
+ 	case ATTR_DMP_LCD_POS_TIME_THRESH:
+-		return sprintf(buf, "%d\n", st->lcd_pos.time);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->lcd_pos.time);
+ 	case ATTR_DMP_LCD_POS_UP_X_THRESH:
+-		return sprintf(buf, "%d\n", st->lcd_pos.up_x);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->lcd_pos.up_x);
+ 	case ATTR_DMP_LCD_POS_UP_Y_THRESH:
+-		return sprintf(buf, "%d\n", st->lcd_pos.up_y);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->lcd_pos.up_y);
+ 	case ATTR_DMP_LCD_POS_UP_Z_THRESH:
+-		return sprintf(buf, "%d\n", st->lcd_pos.up_z);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->lcd_pos.up_z);
+ 	case ATTR_DMP_LCD_POS_DOWN_X_THRESH:
+-		return sprintf(buf, "%d\n", st->lcd_pos.down_x);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->lcd_pos.down_x);
+ 	case ATTR_DMP_LCD_POS_DOWN_Y_THRESH:
+-		return sprintf(buf, "%d\n", st->lcd_pos.down_y);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->lcd_pos.down_y);
+ 	case ATTR_DMP_LCD_POS_DOWN_Z_THRESH:
+-		return sprintf(buf, "%d\n", st->lcd_pos.down_z);
++		return snprintf(buf, PAGE_SIZE, "%d\n", st->lcd_pos.down_z);
+ 	case ATTR_DMP_DISPLAY_ORIENTATION_ON:
+-		return sprintf(buf, "%d\n",
++		return snprintf(buf, PAGE_SIZE, "%d\n",
+ 			st->chip_config.display_orient_on);
+ 	case ATTR_DMP_ON:
+-		return sprintf(buf, "%d\n", st->chip_config.dmp_on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->chip_config.dmp_on);
+ 	case ATTR_DMP_INT_ON:
+-		return sprintf(buf, "%d\n", st->chip_config.dmp_int_on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->chip_config.dmp_int_on);
+ 	case ATTR_DMP_EVENT_INT_ON:
+-		return sprintf(buf, "%d\n", st->chip_config.dmp_event_int_on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->chip_config.dmp_event_int_on);
+ 	case ATTR_DMP_STEP_INDICATOR_ON:
+-		return sprintf(buf, "%d\n", st->chip_config.step_indicator_on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->chip_config.step_indicator_on);
+ 	case ATTR_DMP_BATCHMODE_TIMEOUT:
+-		return sprintf(buf, "%d\n",
++		return snprintf(buf, PAGE_SIZE, "%d\n",
+ 				st->batch.timeout);
+ 	case ATTR_DMP_BATCHMODE_WAKE_FIFO_FULL:
+-		return sprintf(buf, "%d\n",
++		return snprintf(buf, PAGE_SIZE, "%d\n",
+ 				st->batch.wake_fifo_on);
+ 	case ATTR_DMP_SIX_Q_ON:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_SIXQ].on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_SIXQ].on);
+ 	case ATTR_DMP_SIX_Q_RATE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_SIXQ].rate);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_SIXQ].rate);
+ 	case ATTR_DMP_LPQ_ON:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_LPQ].on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_LPQ].on);
+ 	case ATTR_DMP_LPQ_RATE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_LPQ].rate);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_LPQ].rate);
+ 	case ATTR_DMP_PED_Q_ON:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_PEDQ].on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_PEDQ].on);
+ 	case ATTR_DMP_PED_Q_RATE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_PEDQ].rate);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_PEDQ].rate);
+ 	case ATTR_DMP_STEP_DETECTOR_ON:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_STEP].on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_STEP].on);
+ 	case ATTR_MOTION_LPA_ON:
+-		return sprintf(buf, "%d\n", st->mot_int.mot_on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->mot_int.mot_on);
+ 	case ATTR_MOTION_LPA_FREQ:{
+ 		const char *f[] = {"1.25", "5", "20", "40"};
+-		return sprintf(buf, "%s\n", f[st->chip_config.lpa_freq]);
++		return snprintf(buf, PAGE_SIZE, "%s\n",
++			f[st->chip_config.lpa_freq]);
+ 	}
+ 	case ATTR_MOTION_LPA_THRESHOLD:
+-		return sprintf(buf, "%d\n", st->mot_int.mot_thr);
+-
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->mot_int.mot_thr);
+ 	case ATTR_SELF_TEST_SAMPLES:
+-		return sprintf(buf, "%d\n", st->self_test.samples);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->self_test.samples);
+ 	case ATTR_SELF_TEST_THRESHOLD:
+-		return sprintf(buf, "%d\n", st->self_test.threshold);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->self_test.threshold);
+ 	case ATTR_GYRO_ENABLE:
+-		return sprintf(buf, "%d\n", st->chip_config.gyro_enable);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->chip_config.gyro_enable);
+ 	case ATTR_GYRO_FIFO_ENABLE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_GYRO].on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_GYRO].on);
+ 	case ATTR_GYRO_RATE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_GYRO].rate);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_GYRO].rate);
+ 	case ATTR_ACCEL_ENABLE:
+-		return sprintf(buf, "%d\n", st->chip_config.accel_enable);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->chip_config.accel_enable);
+ 	case ATTR_ACCEL_FIFO_ENABLE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_ACCEL].on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_ACCEL].on);
+ 	case ATTR_ACCEL_RATE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_ACCEL].rate);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_ACCEL].rate);
+ 	case ATTR_COMPASS_ENABLE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_COMPASS].on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_COMPASS].on);
+ 	case ATTR_COMPASS_RATE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_COMPASS].rate);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_COMPASS].rate);
+ 	case ATTR_PRESSURE_ENABLE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_PRESSURE].on);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_PRESSURE].on);
+ 	case ATTR_PRESSURE_RATE:
+-		return sprintf(buf, "%d\n", st->sensor[SENSOR_PRESSURE].rate);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->sensor[SENSOR_PRESSURE].rate);
+ 	case ATTR_POWER_STATE:
+-		return sprintf(buf, "%d\n", !fake_asleep);
++		return snprintf(buf, PAGE_SIZE, "%d\n", !fake_asleep);
+ 	case ATTR_FIRMWARE_LOADED:
+-		return sprintf(buf, "%d\n", st->chip_config.firmware_loaded);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->chip_config.firmware_loaded);
+ 	case ATTR_SAMPLING_FREQ:
+-		return sprintf(buf, "%d\n", st->chip_config.fifo_rate);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			st->chip_config.fifo_rate);
+ 	case ATTR_SELF_TEST:
+ 		mutex_lock(&indio_dev->mlock);
+ 		if (st->chip_config.enable) {
+@@ -1362,28 +1396,26 @@
+ 		else
+ 			result = inv_hw_self_test(st);
+ 		mutex_unlock(&indio_dev->mlock);
+-		return sprintf(buf, "%d\n", result);
++		return snprintf(buf, PAGE_SIZE, "%d\n", result);
+ 	case ATTR_GYRO_MATRIX:
+ 		m = st->plat_data.orientation;
+-		return sprintf(buf, "%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
++		return snprintf(buf, PAGE_SIZE, "%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+ 			m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
+ 	case ATTR_ACCEL_MATRIX:
+ 		if (st->plat_data.sec_slave_type ==
+ 						SECONDARY_SLAVE_TYPE_ACCEL)
+-			m =
+-			st->plat_data.secondary_orientation;
++			m = st->plat_data.secondary_orientation;
+ 		else
+ 			m = st->plat_data.orientation;
+-		return sprintf(buf, "%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
++		return snprintf(buf, PAGE_SIZE, "%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+ 			m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
+ 	case ATTR_COMPASS_MATRIX:
+ 		if (st->plat_data.sec_slave_type ==
+ 				SECONDARY_SLAVE_TYPE_COMPASS)
+-			m =
+-			st->plat_data.secondary_orientation;
++			m = st->plat_data.secondary_orientation;
+ 		else
+ 			return -ENODEV;
+-		return sprintf(buf, "%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
++		return snprintf(buf, PAGE_SIZE, "%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+ 			m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
+ 	case ATTR_SECONDARY_NAME:
+ 	{
+@@ -1391,24 +1423,24 @@
+ 					"BMA250", "MLX90399", "AK09901"};
+ 		switch (st->plat_data.sec_slave_id) {
+ 		case COMPASS_ID_AK8975:
+-			return sprintf(buf, "%s\n", n[1]);
++			return snprintf(buf, PAGE_SIZE, "%s\n", n[1]);
+ 		case COMPASS_ID_AK8972:
+-			return sprintf(buf, "%s\n", n[2]);
++			return snprintf(buf, PAGE_SIZE, "%s\n", n[2]);
+ 		case COMPASS_ID_AK8963:
+-			return sprintf(buf, "%s\n", n[3]);
++			return snprintf(buf, PAGE_SIZE, "%s\n", n[3]);
+ 		case ACCEL_ID_BMA250:
+-			return sprintf(buf, "%s\n", n[4]);
++			return snprintf(buf, PAGE_SIZE, "%s\n", n[4]);
+ 		case COMPASS_ID_MLX90399:
+-			return sprintf(buf, "%s\n", n[5]);
++			return snprintf(buf, PAGE_SIZE, "%s\n", n[5]);
+ 		case COMPASS_ID_AK09911:
+-			return sprintf(buf, "%s\n", n[6]);
++			return snprintf(buf, PAGE_SIZE, "%s\n", n[6]);
+ 		default:
+-			return sprintf(buf, "%s\n", n[0]);
++			return snprintf(buf, PAGE_SIZE, "%s\n", n[0]);
+ 		}
+ 	}
+ #ifdef CONFIG_INV_TESTING
+ 	case ATTR_REG_WRITE:
+-		return sprintf(buf, "1\n");
++		return snprintf(buf, PAGE_SIZE, "1\n");
+ 	case ATTR_COMPASS_SENS:
+ 	{
+ 		/* these 2 conditions should never be met, since the
+@@ -1422,7 +1454,7 @@
+ 		    st->plat_data.sec_slave_id != COMPASS_ID_AK8963)
+ 			return -ENODEV;
+ 		m = st->chip_info.compass_sens;
+-		return sprintf(buf, "%d,%d,%d\n", m[0], m[1], m[2]);
++		return snprintf(buf, PAGE_SIZE, "%d,%d,%d\n", m[0], m[1], m[2]);
+ 	}
+ 	case ATTR_DEBUG_SMD_EXE_STATE:
+ 	{
+@@ -1431,7 +1463,8 @@
+ 		result = st->set_power_state(st, true);
+ 		mpu_memory_read(st, st->i2c_addr,
+ 				inv_dmp_get_address(KEY_SMD_EXE_STATE), 2, d);
+-		return sprintf(buf, "%d\n", (short)be16_to_cpup((__be16 *)(d)));
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			(short)be16_to_cpup((__be16 *)(d)));
+ 	}
+ 	case ATTR_DEBUG_SMD_DELAY_CNTR:
+ 	{
+@@ -1440,7 +1473,8 @@
+ 		result = st->set_power_state(st, true);
+ 		mpu_memory_read(st, st->i2c_addr,
+ 				inv_dmp_get_address(KEY_SMD_DELAY_CNTR), 4, d);
+-		return sprintf(buf, "%d\n", (int)be32_to_cpup((__be32 *)(d)));
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			(int)be32_to_cpup((__be32 *)(d)));
+ 	}
+ #endif
+ 	default:
+@@ -1457,7 +1491,7 @@
+ {
+ 	struct inv_mpu_state *st = iio_priv(dev_get_drvdata(dev));
+ 
+-	return sprintf(buf, "%d\n", st->display_orient_data);
++	return snprintf(buf, PAGE_SIZE, "%d\n", st->display_orient_data);
+ }
+ 
+ /*
+@@ -1467,7 +1501,7 @@
+ static ssize_t inv_accel_motion_show(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "1\n");
++	return snprintf(buf, PAGE_SIZE, "1\n");
+ }
+ 
+ /*
+@@ -1477,7 +1511,7 @@
+ static ssize_t inv_smd_show(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "1\n");
++	return snprintf(buf, PAGE_SIZE, "1\n");
+ }
+ 
+ /*
+@@ -1487,7 +1521,7 @@
+ static ssize_t inv_ped_show(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "1\n");
++	return snprintf(buf, PAGE_SIZE, "1\n");
+ }
+ 
+ /*
+@@ -1499,7 +1533,7 @@
+ {
+ 	struct inv_mpu_state *st = iio_priv(dev_get_drvdata(dev));
+ 
+-	return sprintf(buf, "%d\n", st->lcd_pos.data);
++	return snprintf(buf, PAGE_SIZE, "%d\n", st->lcd_pos.data);
+ }
+ 
+ /*
+@@ -1511,7 +1545,7 @@
+ {
+ 	struct inv_mpu_state *st = iio_priv(dev_get_drvdata(dev));
+ 
+-	return sprintf(buf, "%d\n", st->tap_data);
++	return snprintf(buf, PAGE_SIZE, "%d\n", st->tap_data);
+ }
+ 
+ /*
+@@ -1520,7 +1554,6 @@
+ static ssize_t inv_temperature_show(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+-
+ 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
+ 	struct inv_mpu_state *st = iio_priv(indio_dev);
+ 	struct inv_reg_map_s *reg;
+@@ -1571,7 +1604,7 @@
+ 
+ 	INV_I2C_INC_TEMPREAD(1);
+ 
+-	return sprintf(buf, "%ld %lld\n", scale_t, get_time_ns());
++	return snprintf(buf, PAGE_SIZE, "%ld %lld\n", scale_t, get_time_ns());
+ }
+ 
+ static ssize_t inv_flush_batch_show(struct device *dev,
+@@ -1579,15 +1612,16 @@
+ {
+ 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
+ 	int result;
+-	bool has_data;
++	bool has_data = false;
+ 
+ 	mutex_lock(&indio_dev->mlock);
+ 	result = inv_flush_batch_data(indio_dev, &has_data);
+ 	mutex_unlock(&indio_dev->mlock);
++
+ 	if (result)
+-		return sprintf(buf, "%d\n", result);
++		return snprintf(buf, PAGE_SIZE, "%d\n", result);
+ 	else
+-		return sprintf(buf, "%d\n", has_data);
++		return snprintf(buf, PAGE_SIZE, "%d\n", has_data);
+ }
+ 
+ /*
+@@ -1670,8 +1704,8 @@
+ 	{
+ 		const u8 *ch;
+ 
+-		if ((data > MPU_MAX_A_OFFSET_VALUE) ||
+-			(data < MPU_MIN_A_OFFSET_VALUE))
++		if ((data > MPU_MAX_2G_OFFSET_VALUE) ||
++				(data < MPU_MIN_2G_OFFSET_VALUE))
+ 			return -EINVAL;
+ 
+ 		axis = this_attr->address - ATTR_ACCEL_X_OFFSET;
+@@ -1933,6 +1967,9 @@
+ 		goto end_enable;
+ 	}
+ 	if (!!data) {
++		if (st->reactive_enable)
++			st->reactive_accel_on_time = jiffies;
++
+ 		result = st->set_power_state(st, true);
+ 		if (result)
+ 			goto end_enable;
+@@ -1958,7 +1995,7 @@
+ {
+ 	struct inv_mpu_state *st = iio_priv(dev_get_drvdata(dev));
+ 
+-	return sprintf(buf, "%d\n", st->chip_config.enable);
++	return snprintf(buf, PAGE_SIZE, "%d\n", st->chip_config.enable);
+ }
+ 
+ #ifdef CONFIG_INV_TESTING
+@@ -1984,7 +2021,7 @@
+ 	struct device_attribute *attr, char *buf)
+ {
+ 
+-	return sprintf(buf, "%d\n", suspend_state);
++	return snprintf(buf, PAGE_SIZE, "%d\n", suspend_state);
+ }
+ 
+ /*
+@@ -2153,19 +2190,26 @@
+ 
+ 	switch (this_attr->address) {
+ 	case ATTR_DEBUG_ACCEL_COUNTER:
+-		return sprintf(buf, "%d\n", data_out_control.accel);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			data_out_control.accel);
+ 	case ATTR_DEBUG_GYRO_COUNTER:
+-		return sprintf(buf, "%d\n", data_out_control.gyro);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			data_out_control.gyro);
+ 	case ATTR_DEBUG_COMPASS_COUNTER:
+-		return sprintf(buf, "%d\n", data_out_control.compass);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			data_out_control.compass);
+ 	case ATTR_DEBUG_PRESSURE_COUNTER:
+-		return sprintf(buf, "%d\n", data_out_control.pressure);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			data_out_control.pressure);
+ 	case ATTR_DEBUG_LPQ_COUNTER:
+-		return sprintf(buf, "%d\n", data_out_control.LPQ);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			data_out_control.LPQ);
+ 	case ATTR_DEBUG_SIXQ_COUNTER:
+-		return sprintf(buf, "%d\n", data_out_control.SIXQ);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			data_out_control.SIXQ);
+ 	case ATTR_DEBUG_PEDQ_COUNTER:
+-		return sprintf(buf, "%d\n", data_out_control.PEDQ);
++		return snprintf(buf, PAGE_SIZE, "%d\n",
++			data_out_control.PEDQ);
+ 	default:
+ 		return -EINVAL;
+ 	}
+@@ -2630,7 +2674,7 @@
+ 	unsigned char data[6];
+ 	int acc_enable;
+ 	struct file *cal_filp;
+-	int sum[3] = { 0, };
++	int sum[3] = {0, };
+ 	mm_segment_t old_fs = {0};
+ 
+ 	reg = &(st->reg);
+@@ -2642,7 +2686,8 @@
+ 		if (!st->chip_config.enable) {
+ 				result = st->set_power_state(st, true);
+ 				if (result) {
+-					pr_err("%s,Could not chip enable fail.\n", __func__);
++				pr_err("%s, Could not chip enable fail.\n",
++					__func__);
+ 					return result;
+ 				}
+ 		}
+@@ -2653,28 +2698,31 @@
+ 
+ 			result = st->switch_accel_engine(st, true);
+ 			if (result) {
+-				pr_err("%s,Could not accel enable fail.\n", __func__);
++				pr_err("%s, Could not accel enable fail.\n",
++					__func__);
+ 				return result;
+ 			}
+ 		}
+ 
+ 		for (i = 0; i < 10; i++) {
+-			result = inv_i2c_read(st, reg->raw_accel, BYTES_PER_SENSOR, data);
++			result = inv_i2c_read(st, reg->raw_accel,
++				BYTES_PER_SENSOR, data);
+ 			if (result) {
+-				pr_err("%s,Could not accel enable fail.\n", __func__);
++				pr_err("%s, Could not accel enable fail.\n",
++					__func__);
+ 				return result;
+ 			}
+ 
+-			x = (signed short)(((data[0] << 8) | data[1])*st->chip_info.multi);
+-			y = (signed short)(((data[2] << 8) | data[3])*st->chip_info.multi);
+-			z = (signed short)(((data[4] << 8) | data[5])*st->chip_info.multi);
++			x = (signed short)(((data[0] << 8) | data[1]) * st->chip_info.multi);
++			y = (signed short)(((data[2] << 8) | data[3]) * st->chip_info.multi);
++			z = (signed short)(((data[4] << 8) | data[5]) * st->chip_info.multi);
+ 
+ 			sum[0] += (0 - (m[0] * x + m[1] * y + m[2] * z));
+ 			sum[1] += (0 - (m[3] * x + m[4] * y + m[5] * z));
+ 			if ((m[6] * x + m[7] * y + m[8] * z) > 0)
+-				sum[2] += (16383 - (m[6] * x + m[7] * y + m[8] * z));
++				sum[2] += (MPU_MAX_2G_OFFSET_VALUE - (m[6] * x + m[7] * y + m[8] * z));
+ 			else
+-				sum[2] += (-16383 - (m[6] * x + m[7] * y + m[8] * z));
++				sum[2] += (MPU_MIN_2G_OFFSET_VALUE - (m[6] * x + m[7] * y + m[8] * z));
+ 			usleep_range(10000, 11000);
+ 		}
+ 
+@@ -2686,7 +2734,8 @@
+ 
+ 			result = st->switch_accel_engine(st, false);
+ 			if (result) {
+-				pr_err("%s,Could not accel disable fail.\n", __func__);
++				pr_err("%s, Could not accel disable fail\n",
++					__func__);
+ 				return result;
+ 			}
+ 		}
+@@ -2694,7 +2743,8 @@
+ 		if (!st->chip_config.enable) {
+ 				result = st->set_power_state(st, false);
+ 				if (result) {
+-					pr_err("%s,Could not chip disable fail.\n", __func__);
++				pr_err("%s, Could not chip disable fail.\n",
++					__func__);
+ 					return result;
+ 				}
+ 		}
+@@ -2709,8 +2759,7 @@
+ 	set_fs(KERNEL_DS);
+ 
+ 	cal_filp = filp_open(MPU6500_ACCEL_CAL_PATH,
+-			O_CREAT | O_TRUNC | O_WRONLY,
+-			S_IRUGO | S_IWUSR | S_IWGRP);
++		O_CREAT | O_TRUNC | O_WRONLY, 0660);
+ 	if (IS_ERR(cal_filp)) {
+ 		pr_err("%s: Can't open calibration file\n", __func__);
+ 		set_fs(old_fs);
+@@ -2719,8 +2768,7 @@
+ 	}
+ 
+ 	result = cal_filp->f_op->write(cal_filp,
+-		(char *)&st->cal_data, 3 * sizeof(s16),
+-			&cal_filp->f_pos);
++		(char *)&st->cal_data, 3 * sizeof(s16), &cal_filp->f_pos);
+ 	if (result != 3 * sizeof(s16)) {
+ 		pr_err("%s: Can't write the cal data to file\n", __func__);
+ 		if (enable)
+@@ -2741,22 +2789,20 @@
+ }
+ 
+ static ssize_t inv_accel_cal_store(struct device *dev,
+-				struct device_attribute *attr,
+-					const char *buf, size_t size)
++	struct device_attribute *attr, const char *buf, size_t size)
+ {
+ 	struct inv_mpu_state *st;
+ 	int err, enable;
+-	err = kstrtoint(buf, 10, &enable);
+ 
++	err = kstrtoint(buf, 10, &enable);
+ 	if (err) {
+ 		pr_err("%s, kstrtoint fail\n", __func__);
+ 	} else {
+ 		st = dev_get_drvdata(dev);
+ 		err = accel_do_calibrate(st, enable);
+-		if (err) {
++		if (err)
+ 			pr_err("%s, accel calibration fail\n", __func__);
+ 		}
+-	}
+ 
+ 	return size;
+ }
+@@ -2798,30 +2844,29 @@
+ }
+ 
+ static ssize_t inv_reactive_store(struct device *dev,
+-				struct device_attribute *attr,
+-					const char *buf, size_t size)
++	struct device_attribute *attr, const char *buf, size_t size)
+ {
+ 	struct inv_mpu_state *st = dev_get_drvdata(dev);
+ 	bool onoff = false;
+ 	unsigned long enable = 0;
+ 	int result;
+ 
+-	if (strict_strtoul(buf, 10, &enable)) {
+-		pr_err("[SENSOR] %s, kstrtoint fail\n", __func__);
++	if (kstrtoul(buf, 10, &enable)) {
++		pr_err("%s, kstrtoul fail\n", __func__);
+ 		return -EINVAL;
+ 	}
+ 
+-	pr_err("[SENSOR] %s: enable = %ld\n", __func__, enable);
++	pr_info("%s: enable = %ld\n", __func__, enable);
+ 
+-	if (enable == 1) {
++	if (enable == 1)
+ 		onoff = true;
+-	} else if (enable == 0) {
++	else if (enable == 0)
+ 		onoff = false;
+-	} else if (enable == 2) {
++	else if (enable == 2) {
+ 		onoff = true;
+ 		st->factory_mode = true;
+ 	} else {
+-		pr_err("[SENSOR] %s: invalid value %d\n", __func__, *buf);
++		pr_err("%s: invalid value %d\n", __func__, *buf);
+ 		return -EINVAL;
+ 	}
+ 
+@@ -2845,14 +2890,14 @@
+ 			st->mot_int.mot_on)) {
+ 		result = set_inv_enable(st->indio_dev, false);
+ 		if (result)
+-			pr_err("[SENSOR] %s, set_inv_enable error\n", __func__);
++			pr_err("%s, set_inv_enable error\n", __func__);
+ 	} else {
+ 		result = set_inv_enable(st->indio_dev, true);
+ 		if (result)
+-			pr_err("[SENSOR] %s, set_inv_enable error\n", __func__);
++			pr_err("%s, set_inv_enable error\n", __func__);
+ 	}
+ 
+-	pr_info("[SENSOR] %s: onoff = %d, state =%d OUT\n", __func__,
++	pr_info("%s: onoff = %d, state =%d OUT\n", __func__,
+ 			st->reactive_enable,
+ 			st->reactive_state);
+ 
+@@ -2904,16 +2949,16 @@
+ 
+ 	result = inv_i2c_read(st, MPUREG_TEMP_OUT_H, 2, reg);
+ 	if (result) {
+-		pr_err("[SENSOR] %s: Could not read temperature register.\n", __func__);
++		pr_err("%s: Could not read temperature register.\n", __func__);
+ 		return result;
+ 	}
+ 
+ 	temperature = (short) (((reg[0]) << 8) | reg[1]);
+ 	temperature = ((temperature / 334) + 21);
+ 
+-	pr_info("[SENSOR] %s: read temperature = %d\n", __func__, temperature);
++	pr_info("%s: read temperature = %d\n", __func__, temperature);
+ 
+-	return sprintf(buf, "%d\n", temperature);
++	return snprintf(buf, PAGE_SIZE, "%d\n", temperature);
+ }
+ 
+ static ssize_t inv_mpu_selftest_show(struct device *dev,
+@@ -2950,7 +2995,8 @@
+ 
+ 	if (success != 0) {
+ 		if (retryCnt++ < 2) {
+-			pr_err("%s, returns wrong value. retry %d", __func__, retryCnt);
++			pr_err("%s, returns wrong value. retry %d", __func__,
++				retryCnt);
+ 			goto retry;
+ 		}
+ 	} else {
+@@ -3001,20 +3047,15 @@
+ }
+ 
+ static struct device_attribute dev_attr_gyro_selftest =
+-	__ATTR(selftest, S_IRUSR | S_IRGRP,
+-	inv_mpu_selftest_show, NULL);
++	__ATTR(selftest, S_IRUSR | S_IRGRP, inv_mpu_selftest_show, NULL);
+ static struct device_attribute dev_attr_gyro_temperature =
+-	__ATTR(temperature, S_IRUSR | S_IRGRP,
+-	inv_mpu_temp_show, NULL);
++	__ATTR(temperature, S_IRUSR | S_IRGRP, inv_mpu_temp_show, NULL);
+ static struct device_attribute dev_attr_gyro_power_on =
+-	__ATTR(power_on, S_IRUSR | S_IRGRP,
+-	inv_mpu_power_show, NULL);
++	__ATTR(power_on, S_IRUSR | S_IRGRP, inv_mpu_power_show, NULL);
+ static struct device_attribute dev_attr_gyro_vendor =
+-	__ATTR(vendor, S_IRUSR | S_IRGRP,
+-	inv_mpu_vendor_show, NULL);
++	__ATTR(vendor, S_IRUSR | S_IRGRP, inv_mpu_vendor_show, NULL);
+ static struct device_attribute dev_attr_gyro_name =
+-	__ATTR(name, S_IRUSR | S_IRGRP,
+-	inv_mpu_name_show, NULL);
++	__ATTR(name, S_IRUSR | S_IRGRP, inv_mpu_name_show, NULL);
+ 
+ static struct device_attribute *gyro_sensor_attrs[] = {
+ 	&dev_attr_gyro_selftest,
+@@ -3024,7 +3065,6 @@
+ 	&dev_attr_gyro_name,
+ 	NULL,
+ };
+-
+ #endif
+ 
+ static void inv_setup_func_ptr(struct inv_mpu_state *st)
+@@ -3328,73 +3368,44 @@
+ 	return result;
+ }
+ 
+-/*
+- *  inv_mpu_probe() - probe function.
+- */
+- 
+ void  inv_vdd_on(struct inv_mpu_state *data, bool onoff)
+ {
+ 	int ret;
+ 	if (data->lvs1_1p8 == NULL) {
+-		data->lvs1_1p8 = regulator_get(&data->client->dev, "8941_lvs1");
+-		if (IS_ERR(data->lvs1_1p8)){
+-			pr_err("%s: regulator_get failed for 8941_lvs1\n", __func__);
++		data->lvs1_1p8 = regulator_get(&data->client->dev,
++			"8941_lvs1");
++		if (IS_ERR(data->lvs1_1p8)) {
++			pr_err("%s: regulator_get failed for 8941_lvs1\n",
++				__func__);
+ 			return ;
+ 		}
+ 		ret = regulator_set_voltage(data->lvs1_1p8, 1800000, 1800000);
+ 		if (ret)
+-			pr_err("%s: error vreg_2p8 setting voltage ret=%d\n",__func__, ret);
++			pr_err("%s: error vreg_1p8 setting voltage ret=%d\n",
++				__func__, ret);
+ 	}
+-	if (onoff == 1) {
++
++	if (onoff) {
+ 		ret = regulator_enable(data->lvs1_1p8);
+ 		if (ret)
+-			pr_err("%s: error enablinig regulator info->vreg_1p8\n", __func__);
+-	} else if (onoff == 0) {
++			pr_err("%s: error enablinig regulator vreg_1p8\n",
++				__func__);
++	} else {
+ 		if (regulator_is_enabled(data->lvs1_1p8)) {
+ 			ret = regulator_disable(data->lvs1_1p8);
+ 			if (ret)
+-				pr_err("%s: error vreg_1p8 disabling regulator\n",__func__);
++				pr_err("%s: disabling vreg_1p8 failed\n",
++					__func__);
+ 		}
+ 	}
+ 	msleep(30);
+ 	return;
+ }
+ 
+-#if 0
+-static void inv_request_gpio(struct mpu_platform_data *pdata)
+-{
+-	int ret;
+-	pr_info("[MPU6515] request gpio\n");
+-	ret = gpio_request(pdata->gpio_scl, "mpu6500_scl");
+-	if (ret) {
+-		pr_err("[MPU6515]%s: unable to request mpu6500_scl [%d]\n",
+-				__func__, pdata->gpio_scl);
+-		return;
+-				}
+-	ret = gpio_request(pdata->gpio_sda, "mpu6500_sda");
+-	if (ret) {
+-		pr_err("[MPU6515]%s: unable to request mpu6500_sda [%d]\n",
+-				__func__, pdata->gpio_sda);
+-		return;
+-			}
+-
+-	ret = gpio_request(pdata->gpio_int, "mpu6500_irq");
+-	if (ret) {
+-		pr_err("[MPU6515]%s: unable to request mpu6500_irq [%d]\n",
+-				__func__, pdata->gpio_int);
+-		return;
+-		}
+-}
+-
+-#endif
+-
+ #ifdef CONFIG_OF
+-
+ /* device tree parsing function */
+-static int inv_parse_dt(struct device *dev,
+-			struct  mpu_platform_data *pdata)
++static int inv_parse_dt(struct device *dev, struct  mpu_platform_data *pdata)
+ {
+-
+ 	struct device_node *np = dev->of_node;
+ 
+ 	pdata->orientation[0] = 1;
+@@ -3407,19 +3418,19 @@
+  	pdata->orientation[7] = 0;
+  	pdata->orientation[8] = -1;
+ 
+-	pdata->i2c_pull_up = of_property_read_bool(np, "invensense,i2c-pull-up");
++	pdata->i2c_pull_up = of_property_read_bool(np,
++		"invensense,i2c-pull-up");
+ 
+-	pdata->gpio_scl = of_get_named_gpio_flags(np,"invensense,scl-gpio",
+-	0, &pdata->scl_gpio_flags);
++	pdata->gpio_scl = of_get_named_gpio_flags(np, "invensense,scl-gpio", 0,
++		&pdata->scl_gpio_flags);
++	pdata->gpio_sda = of_get_named_gpio_flags(np, "invensense,sda-gpio", 0,
++		&pdata->sda_gpio_flags);
+ 
+-	pdata->gpio_sda = of_get_named_gpio_flags(np, "invensense,sda-gpio",
+-	0, &pdata->sda_gpio_flags);
+ 	/*device tree node properties can be parsed this way*/
+-	pdata->gpio_int = of_get_named_gpio_flags(np, "invensense,irq-gpio",
+-	0, &pdata->irq_gpio_flags);
++	pdata->gpio_int = of_get_named_gpio_flags(np, "invensense,irq-gpio", 0,
++		&pdata->irq_gpio_flags);
+ 
+ 	/* accel and gyro calibration path */
+-
+ 	pdata->acc_cal_path = of_get_property(np, "invensense,acc_cal_path",
+ 	NULL);
+ 	pdata->gyro_cal_path = of_get_property(np, "invensense,gyro_cal_path",
+@@ -3428,7 +3439,8 @@
+ 	pdata->int_config = 0x00;
+ 	pdata->level_shifter = 0; 
+ 
+-	pr_err("inv_parse_dt complete, SCL:%d SDA:%d IRQ:%d\n",pdata->gpio_scl, pdata->gpio_sda, pdata->gpio_int );
++	pr_info("%s complete, SCL:%d SDA:%d IRQ:%d\n", __func__,
++		pdata->gpio_scl, pdata->gpio_sda, pdata->gpio_int);
+ 
+ 	return 0;
+ }
+@@ -3440,43 +3452,41 @@
+ }
+ #endif
+ 
++/*
++ *  inv_mpu_probe() - probe function.
++ */
+ static int inv_mpu_probe(struct i2c_client *client,
+ 	const struct i2c_device_id *id)
+ {
+ 	struct inv_mpu_state *st;
+ 	struct iio_dev *indio_dev;
+ 	struct mpu_platform_data *pdata;
+-	int error = 0;
+-
+ 	int result;
+ 
+-	pr_info("[SENSOR] %s is called!!\n", __func__);
++	pr_info("%s is called!!\n", __func__);
+ 
+ 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
+ 		result = -ENOSYS;
+ 		pr_err("I2c function error\n");
+ 		goto out_no_free;
+ 	}
+-	if (client-> dev.of_node) {
+-		pdata = devm_kzalloc (&client->dev ,
+-			sizeof (struct mpu_platform_data), GFP_KERNEL);
++
++	if (client->dev.of_node) {
++		pdata = devm_kzalloc(&client->dev,
++			sizeof(struct mpu_platform_data), GFP_KERNEL);
+ 		if (!pdata) {
+ 			dev_err(&client->dev, "Failed to allocate memory\n");
+ 			return -ENOMEM;
+ 		}
+-		error = inv_parse_dt(&client->dev, pdata);
+-		if (error)
+-			return error;
+-	} 
+-	else
+-		{
++		result = inv_parse_dt(&client->dev, pdata);
++		if (result)
++			return result;
++	} else {
+ 		/* get platform data */
+ 		pdata = client->dev.platform_data;
+-	
+ 	if (!pdata)
+ 		return -EINVAL;
+ 	}
+-	//inv_request_gpio(pdata);
+ 
+ 	indio_dev = iio_allocate_device(sizeof(*st));
+ 	if (indio_dev == NULL) {
+@@ -3489,17 +3499,16 @@
+ 	st->client = client;
+ 	st->sl_handle = client->adapter;
+ 	st->i2c_addr = client->addr;
+-	st->plat_data =*pdata;
+-		//*(struct mpu_platform_data *)dev_get_platdata(&client->dev);
++	st->plat_data = *pdata;
+ 	
+-	inv_vdd_on(st, 1);
++	inv_vdd_on(st, true);
+ 		
+-	msleep(10);
++	msleep(20);
+ 
+ 	/* power is turned on inside check chip type*/
+ 	result = inv_check_chip_type(st, id);
+ 	if (result) {
+-		pr_err("%s : inv_check_chip_type\n", __func__);
++		pr_err("%s: inv_check_chip_type\n", __func__);
+ 		goto out_free;
+ 	}
+ 
+@@ -3696,12 +3705,13 @@
+ {
+ 	struct iio_dev *indio_dev = i2c_get_clientdata(to_i2c_client(dev));
+ 	struct inv_mpu_state *st = iio_priv(indio_dev);
+-	int result;
++	int result = 0;
+ 
+-	pr_err("%s inv_mpu_resume(%d,%d,%d)\n", __func__,
+-		st->chip_config.dmp_on, st->chip_config.enable, st->chip_config.is_overflow);
++	pr_info("%s: dmp_on(%d) enable(%d) is_overflow(%d)\n", __func__,
++		st->chip_config.dmp_on,
++		st->chip_config.enable,
++		st->chip_config.is_overflow);
+ 
+-	result = 0;
+ 	if (st->chip_config.dmp_on && st->chip_config.enable) {
+ 		result = st->set_power_state(st, true);
+ 		result |= inv_read_time_and_ticks(st, true);
+@@ -3718,7 +3728,8 @@
+ 	enable_irq(st->client->irq);
+ 	if (result)
+ 		pr_err("%s result fail %d\n", __func__, result);
+-	return 0;
++
++	return result;
+ }
+ 
+ static int inv_mpu_suspend(struct device *dev)
+@@ -3727,18 +3738,17 @@
+ 	struct inv_mpu_state *st = iio_priv(indio_dev);
+ 	int result;
+ 
+-	pr_err("%s inv_mpu_suspend(%d,%d)\n", __func__,
+-		st->chip_config.dmp_on, st->chip_config.enable);
++	pr_info("%s: dmp_on(%d) enable(%d)\n", __func__,
++		st->chip_config.dmp_on,
++		st->chip_config.enable);
++
+ 	disable_irq(st->client->irq);
+ 
+ 	result = 0;
+ 	if (st->chip_config.dmp_on && st->chip_config.enable) {
+-		pr_err("%s dmp on\n", __func__);
+ 		/* turn off pedometer interrupt during suspend */
+-		if (st->ped.int_on) {
+-			pr_err("%s int_on\n", __func__);
++		if (st->ped.int_on)
+ 			result |= inv_enable_pedometer_interrupt(st, false);
+-		}
+ 		/* turn off orientation interrupt during suspend */
+ 		if (st->chip_config.display_orient_on)
+ 			result |= inv_set_display_orient_interrupt_dmp(st,
+@@ -3829,4 +3839,3 @@
+ MODULE_DESCRIPTION("Invensense device driver");
+ MODULE_LICENSE("GPL");
+ MODULE_ALIAS("inv-mpu-iio");
+-
+diff -X dontdiff -Nuarb a/drivers/staging/iio/imu/inv_mpu/inv_mpu_iio.h b/drivers/staging/iio/imu/inv_mpu/inv_mpu_iio.h
+--- a/drivers/staging/iio/imu/inv_mpu/inv_mpu_iio.h	2016-01-06 15:00:43.141590574 -0500
++++ b/drivers/staging/iio/imu/inv_mpu/inv_mpu_iio.h	2015-12-01 05:57:00.000000000 -0500
+@@ -233,8 +233,10 @@
+ #define MAX_GYRO_FS_PARAM        3
+ #define MAX_ACCEL_FS_PARAM        3
+ #define MAX_LPA_FREQ_PARAM       3
+-#define MPU_MAX_A_OFFSET_VALUE     16383
+-#define MPU_MIN_A_OFFSET_VALUE     -16384
++#define MPU_MAX_2G_OFFSET_VALUE     16383
++#define MPU_MIN_2G_OFFSET_VALUE     -16384
++#define MPU_MAX_4G_OFFSET_VALUE     8191
++#define MPU_MIN_4G_OFFSET_VALUE     -8192
+ #define MPU_MAX_G_OFFSET_VALUE     32767
+ #define MPU_MIN_G_OFFSET_VALUE     -32767
+ #define MPU6XXX_MAX_MPU_MEM      (256 * 12)
+@@ -358,6 +360,8 @@
+ #define INV_ACCEL_MASK                    0x70
+ #define INV_GYRO_MASK                     0xE
+ 
++#define INV_REACTIVE_ALERT_THRESHOLD 0x0C
++
+ struct inv_mpu_state;
+ 
+ /**
+@@ -810,11 +814,12 @@
+ 	u8 reactive_state;
+ 	u8 reactive_enable;
+ 	bool factory_mode;
++	unsigned long reactive_accel_on_time;
+ 	struct device *gyro_sensor_device;
+ 	struct device *accel_sensor_device;
+ 	struct wake_lock reactive_wake_lock;
+ 	struct motion_int_data mot_data;
+-	unsigned long mot_st_time; //start-up time of motion interrupt
++	unsigned long mot_st_time; /* start-up time of motion interrupt */
+ #endif
+ };
+ 
+@@ -1090,8 +1095,8 @@
+ 	u16 i2c_addr, u8 reg, u8 data);
+ int inv_hw_self_test(struct inv_mpu_state *st);
+ s64 get_time_ns(void);
+-int write_be32_key_to_mem(struct inv_mpu_state *st,
+-					u32 data, int key);
++int write_be32_key_to_mem(struct inv_mpu_state *st, u32 data, int key);
++
+ int inv_set_accel_bias_dmp(struct inv_mpu_state *st);
+ int inv_mpu_setup_compass_slave(struct inv_mpu_state *st);
+ int inv_mpu_setup_pressure_slave(struct inv_mpu_state *st);
+diff -X dontdiff -Nuarb a/drivers/staging/iio/imu/inv_mpu/inv_mpu_misc.c b/drivers/staging/iio/imu/inv_mpu/inv_mpu_misc.c
+--- a/drivers/staging/iio/imu/inv_mpu/inv_mpu_misc.c	2016-01-06 15:00:43.141590574 -0500
++++ b/drivers/staging/iio/imu/inv_mpu/inv_mpu_misc.c	2015-12-01 05:56:52.000000000 -0500
+@@ -270,7 +270,7 @@
+ 	int ii;
+ 	string = kmalloc(len * 2 + 1, GFP_KERNEL);
+ 	for (ii = 0; ii < len; ii++)
+-		sprintf(&string[ii * 2], "%02X", data[ii]);
++		snprintf(&string[ii * 2], PAGE_SIZE, "%02X", data[ii]);
+ 	string[len * 2] = 0;
+ 	return string;
+ }
+@@ -952,7 +952,7 @@
+ 	if (result)
+ 		return result;
+ 	/* wait for the sampling rate change to stabilize */
+-	mdelay(INV_MPU_SAMPLE_RATE_CHANGE_STABLE);
++	msleep(INV_MPU_SAMPLE_RATE_CHANGE_STABLE);
+ 	result = inv_i2c_single_write(st, reg->gyro_config,
+ 		self_test_flag | DEF_SELFTEST_GYRO_FS);
+ 	if (result)
+@@ -993,7 +993,7 @@
+ 		result = inv_i2c_single_write(st, reg->fifo_en, d);
+ 		if (result)
+ 			return result;
+-		mdelay(DEF_GYRO_WAIT_TIME);
++		msleep(DEF_GYRO_WAIT_TIME);
+ 		result = inv_i2c_single_write(st, reg->fifo_en, 0);
+ 		if (result)
+ 			return result;
+@@ -1068,7 +1068,7 @@
+ 	data = ONE_K_HZ/st->chip_config.fifo_rate - 1;
+ 	inv_i2c_single_write(st, reg->sample_rate_div, data);
+ 	/* wait for the sampling rate change to stabilize */
+-	mdelay(INV_MPU_SAMPLE_RATE_CHANGE_STABLE);
++	msleep(INV_MPU_SAMPLE_RATE_CHANGE_STABLE);
+ 	if (INV_ITG3500 != st->chip_type) {
+ 		inv_i2c_single_write(st, reg->accel_config,
+ 				     (st->chip_config.accel_fs <<
+@@ -1775,7 +1775,7 @@
+ 	result = inv_i2c_single_write(st, reg->user_ctrl, BIT_DMP_EN);
+ 	if (result)
+ 		return result;
+-	msleep(10);
++	msleep(20);
+ 	result = inv_i2c_single_write(st, reg->user_ctrl, 0);
+ 	if (result)
+ 		return result;
+@@ -1811,7 +1811,7 @@
+ 	reg = &st->reg;
+ 	if (DMP_IMAGE_SIZE != size) {
+ 		pr_err("wrong DMP image size - expected %d, actual %d\n",
+-			DMP_IMAGE_SIZE, size);
++			DMP_IMAGE_SIZE, (int)size);
+ 		return -EINVAL;
+ 	}
+ 
+@@ -1940,7 +1940,7 @@
+ 	}
+ 	reg = &st->reg;
+ 	if (QUATERNION_BYTES != size) {
+-		pr_err("wrong quaternion size=%d, should=%d\n", size,
++		pr_err("wrong quaternion size=%d, should=%d\n", (int)size,
+ 							QUATERNION_BYTES);
+ 		mutex_unlock(&indio_dev->mlock);
+ 		return -EINVAL;
+diff -X dontdiff -Nuarb a/drivers/staging/iio/imu/inv_mpu/inv_mpu_ring.c b/drivers/staging/iio/imu/inv_mpu/inv_mpu_ring.c
+--- a/drivers/staging/iio/imu/inv_mpu/inv_mpu_ring.c	2016-01-06 15:00:43.142590574 -0500
++++ b/drivers/staging/iio/imu/inv_mpu/inv_mpu_ring.c	2015-12-01 05:57:00.000000000 -0500
+@@ -48,8 +48,8 @@
+ 	return 0;
+ }
+ 
+-static int inv_push_8bytes_buffer(struct inv_mpu_state *st, u16 hdr,
+-							u64 t, s16 *d)
++static int inv_push_8bytes_buffer(struct inv_mpu_state *st, u16 hdr, u64 t,
++	s16 *d)
+ {
+ 	struct iio_dev *indio_dev = iio_priv_to_dev(st);
+ 	u8 buf[IIO_BUFFER_BYTES];
+@@ -136,8 +136,7 @@
+ 	if (curr_ts - slave->prev_ts > slave->min_read_time) {
+ 		result = slave->read_data(st, sen);
+ 		if (!result)
+-			inv_push_8bytes_buffer(st, COMPASS_HDR,
+-						st->last_ts, sen);
++			inv_push_8bytes_buffer(st, COMPASS_HDR, st->last_ts, sen);
+ 		slave->prev_ts = curr_ts;
+ 	}
+ 
+@@ -234,7 +233,7 @@
+ 			return result;
+ 
+ 		result = inv_i2c_single_write(st, reg->user_ctrl,
+-			BIT_FIFO_EN|user_ctrl);
++			BIT_FIFO_EN | user_ctrl);
+ 		if (result)
+ 			return result;
+ 	} else {
+@@ -328,10 +327,8 @@
+ 	if (result)
+ 		return result;
+ 	result = inv_set_lpf(st, fifo_rate);
+-	if (result)
+-		return result;
+ 
+-	return 0;
++	return result;
+ }
+ 
+ /*
+@@ -505,6 +502,26 @@
+ 		goto reset_fifo_fail;
+ 	int_word = 0;
+ 
++	st->last_ts = get_time_ns();
++	st->prev_ts = st->last_ts;
++	st->last_run_time = st->last_ts;
++	if (st->sensor[SENSOR_COMPASS].on)
++		st->slave_compass->prev_ts = st->last_ts;
++	if (st->sensor[SENSOR_PRESSURE].on)
++		st->slave_pressure->prev_ts = st->last_ts;
++
++	st->dmp_interval = DMP_INTERVAL_INIT;
++	st->ts_counter = 0;
++	st->diff_accumulater = 0;
++	st->dmp_interval_accum = 0;
++	st->step_detector_base_ts = st->last_ts;
++	st->chip_config.normal_compass_measure = 0;
++	st->chip_config.normal_pressure_measure = 0;
++	st->left_over_size = 0;
++
++	for (i = 0; i < SENSOR_NUM_MAX; i++)
++		st->sensor[i].ts = st->last_ts;
++
+ 	/* MPU6500's BIT_6500_WOM_EN is the same as BIT_MOT_EN */
+ 	if (st->reactive_enable || st->mot_int.mot_on)
+ 		int_word |= BIT_MOT_EN;
+@@ -514,6 +531,7 @@
+ 		result = inv_i2c_single_write(st, reg->user_ctrl, val);
+ 		if (result)
+ 			goto reset_fifo_fail;
++		usleep_range(REG_UP_TIME, REG_UP_TIME + 100);
+ 		if (st->chip_config.dmp_int_on) {
+ 			int_word |= BIT_DMP_INT_EN;
+ 			result = inv_i2c_single_write(st, reg->int_enable,
+@@ -563,28 +581,6 @@
+ 		if (result)
+ 			goto reset_fifo_fail;
+ 	}
+-	st->last_ts = get_time_ns();
+-	st->prev_ts = st->last_ts;
+-	st->last_run_time = st->last_ts;
+-	if (st->sensor[SENSOR_COMPASS].on)
+-		st->slave_compass->prev_ts = st->last_ts;
+-	if (st->sensor[SENSOR_PRESSURE].on)
+-		st->slave_pressure->prev_ts = st->last_ts;
+-
+-	st->dmp_interval = DMP_INTERVAL_INIT;
+-	st->ts_counter = 0;
+-	st->diff_accumulater = 0;
+-	st->dmp_interval_accum = 0;
+-	st->step_detector_base_ts = st->last_ts;
+-	st->chip_config.normal_compass_measure = 0;
+-	st->chip_config.normal_pressure_measure = 0;
+-	st->left_over_size = 0;
+-	for (i = 0; i < SENSOR_NUM_MAX; i++)
+-		st->sensor[i].ts = st->last_ts;
+-
+-	result = inv_lpa_mode(st, st->chip_config.lpa_mode);
+-	if (result)
+-		goto reset_fifo_fail;
+ 
+ 	return 0;
+ 
+@@ -594,7 +590,7 @@
+ 	else
+ 		val = BIT_DATA_RDY_EN;
+ 	inv_i2c_single_write(st, reg->int_enable, val);
+-	pr_err("reset fifo failed\n");
++	pr_err("%s: reset fifo failed\n", __func__);
+ 
+ 	return result;
+ }
+@@ -916,8 +912,6 @@
+ 	if (result)
+ 		return result;
+ 	result = mem_w_key(KEY_D_STPDET_TIMESTAMP, ARRAY_SIZE(d), d);
+-	if (result)
+-		return result;
+ 
+ 	return result;
+ }
+@@ -956,7 +950,7 @@
+ 	u8 d;
+ #endif
+ 
+-	pr_err("%x %x%x%x%x", enable,
++	pr_info("%s: %x %x%x%x%x", __func__, enable,
+ 		st->chip_config.dmp_on,
+ 		st->chip_config.gyro_enable,
+ 		st->chip_config.accel_enable,
+@@ -1073,15 +1067,15 @@
+ 			return result;
+ 
+ 		if (d & BIT_SLEEP) {
+-			/* Power up the chip and clear the cycle bit. Full power */
++			/* Power up the chip and clear the cycle bit.
++			* Full power */
+ 			inv_i2c_single_write(st, REG_PWR_MGMT_1, 0x01);
+-			mdelay(50);
++			msleep(50);
+ 			inv_i2c_single_write(st, REG_PWR_MGMT_2, 0x00);
+ 		}
+ 
+-		if (!(st->chip_config.enable || st->chip_config.dmp_on)) {
++		if (!(st->chip_config.enable || st->chip_config.dmp_on))
+ 			inv_i2c_single_write(st, REG_CONFIG, 0x00);
+-		}
+ 
+ 		 result = inv_i2c_read(st, REG_INT_ENABLE, 1, &d);
+ 		 if (result)
+@@ -1089,9 +1083,12 @@
+ 
+ 		 /* Set motion thr & dur */
+ 		if (st->factory_mode)
+-			d |= BIT_MOT_INT | 0x01;	/* Make the motion & drdy enable */
++			/* Make the motion & drdy enable */
++			d |= BIT_MOT_INT | 0x01;
+ 		else
+-			d |= BIT_MOT_INT;		/* Make the motion interrupt enable */
++			/* Make the motion interrupt enable */
++			d |= BIT_MOT_INT;
++
+ 		inv_i2c_single_write(st, REG_INT_ENABLE, d);
+ 
+ 		 /* Motion Duration =1 ms */
+@@ -1101,7 +1098,7 @@
+ 		if (st->factory_mode)
+ 			d = 0x00;
+ 		else
+-			d = 0x0C;
++			d = INV_REACTIVE_ALERT_THRESHOLD;
+ 		inv_i2c_single_write(st, REG_6500_ACCEL_WOM_THR, d);
+ 
+ 		d = 0x04;	/* 3.91 Hz (low power accel odr) */
+@@ -1109,18 +1106,18 @@
+ 
+ 		/* put gyro in standby. */
+ 		if (!(st->chip_config.gyro_enable))
+-			inv_i2c_single_write(st, REG_PWR_MGMT_2, BIT_PWR_GYRO_STBY);
++			inv_i2c_single_write(st, REG_PWR_MGMT_2,
++				BIT_PWR_GYRO_STBY);
+ 		else
+-			inv_i2c_single_write(st, REG_PWR_MGMT_2, 0x0);
++			inv_i2c_single_write(st, REG_PWR_MGMT_2, 0x00);
+ 		
+-		if (!(st->chip_config.enable || st->chip_config.dmp_on)) {
++		if (!(st->chip_config.enable || st->chip_config.dmp_on))
+ 			/* Set the cycle bit to be 1. LP MODE */
+ 			inv_i2c_single_write(st, REG_PWR_MGMT_1, 0x21);
+-		} else {
++		else
+ 			inv_i2c_single_write(st, REG_PWR_MGMT_1, 0x01);
+-		}
+ 
+-		pr_info("[SENSOR] %s, setting reactive config\n", __func__);
++		pr_info("%s: setting reactive config\n", __func__);
+ 		st->mot_st_time = jiffies;
+ 	}
+ #endif
+@@ -1259,8 +1256,7 @@
+ 	return IRQ_HANDLED;
+ }
+ 
+-static int inv_report_gyro_accel(struct iio_dev *indio_dev,
+-					u8 *data, s64 t)
++static int inv_report_gyro_accel(struct iio_dev *indio_dev, u8 *data, s64 t)
+ {
+ 	struct inv_mpu_state *st = iio_priv(indio_dev);
+ 	short s[THREE_AXIS];
+@@ -1290,44 +1286,52 @@
+ 
+ static void inv_process_motion(struct inv_mpu_state *st)
+ {
++	struct iio_dev *indio_dev = iio_priv_to_dev(st);
+ 	int result;
+ 	u8 data;
+ #if defined(CONFIG_SENSORS)
+ 	unsigned long timediff = 0;
++	unsigned long timediff2 = 0;
+ #endif
+ 
+-	msleep(30);
+-
+ 	/* motion interrupt */
+ 	result = inv_i2c_read(st, REG_INT_STATUS, 1, &data);
+ 	if (result)
+ 		return;
+-	if(st->factory_mode) {
+-		st->reactive_state = 1;
+-		result = inv_i2c_read(st, REG_INT_ENABLE, 1, &data);
+-		if (result)
+-			return;
+-		data &= ~0x41;
+-		st->factory_mode = false;
+-		inv_i2c_single_write(st, REG_INT_ENABLE, data);
+-		pr_info("[SENSOR] %s: disable interrupt\n", __func__);
+-	}
+-	else 	if (data & BIT_MOT_INT ){
++
++	if (data & BIT_MOT_INT || st->factory_mode) {
++		sysfs_notify(&indio_dev->dev.kobj, NULL, "event_accel_motion");
++
+ #if defined(CONFIG_SENSORS)
+ 		timediff = jiffies_to_msecs(jiffies - st->mot_st_time);
+-		/* ignore motion interrupt happened in 100ms to skip intial erronous interrupt */
+-		if (timediff < 1000 ) {
+-			pr_err("[SENSOR] %s: timediff = %ld msec\n", __func__, timediff);
++		/* ignore motion interrupt happened in 100ms
++		* to skip intial erronous interrupt */
++		if (timediff < 1000 && !(st->factory_mode)) {
++			pr_err("%s: timediff = %ld msec\n", __func__, timediff);
++			return;
++		}
++		timediff2 = jiffies_to_msecs(jiffies - st->reactive_accel_on_time);
++		if (timediff2 < 100 && !(st->factory_mode)) {
++			pr_err("%s: timediff2 = %ld msec\n", __func__, timediff2);
+ 			return;
+ 		}
+ 		st->reactive_state = 1;
++		pr_info("Reactive alert happened ##############\n");
++
+ 		result = inv_i2c_read(st, REG_INT_ENABLE, 1, &data);
+ 		if (result)
+ 			return;
+-		data &= ~0x40;		
++
++		data &= ~BIT_MOT_INT;
++		if (st->factory_mode) {
++			data &= ~0x01;
++			st->factory_mode = false;
++		}
++
+ 		inv_i2c_single_write(st, REG_INT_ENABLE, data);	
+- 		wake_lock_timeout(&st->reactive_wake_lock, msecs_to_jiffies(2000));
+-		pr_info("[SENSOR] %s: interrupt happened\n", __func__);
++		wake_lock_timeout(&st->reactive_wake_lock,
++			msecs_to_jiffies(2000));
++		pr_info("%s: interrupt happened\n", __func__);
+ #endif
+ 	}
+ }
+@@ -1458,7 +1462,7 @@
+ 	u32 dur, i;
+ 
+ 	dur = USEC_PER_SEC / st->bytes_per_sec;
+-	dur *= 1024;
++	dur *= HARDWARE_FIFO_SIZE;
+ 	curr_ts -= ((u64)dur * NSEC_PER_USEC);
+ 	for (i = 0; i < SENSOR_NUM_MAX; i++)
+ 		st->sensor[i].ts = curr_ts;
+@@ -1482,40 +1486,27 @@
+ 
+ static int inv_parse_header(u16 hdr)
+ {
+-	int sensor_ind;
+-
+ 	switch (hdr) {
+ 	case ACCEL_HDR:
+-		sensor_ind = SENSOR_ACCEL;
+-		break;
++		return SENSOR_ACCEL;
+ 	case GYRO_HDR:
+-		sensor_ind = SENSOR_GYRO;
+-		break;
++		return SENSOR_GYRO;
+ 	case PEDQUAT_HDR:
+-		sensor_ind = SENSOR_PEDQ;
+-		break;
++		return SENSOR_PEDQ;
+ 	case LPQUAT_HDR:
+-		sensor_ind = SENSOR_LPQ;
+-		break;
++		return SENSOR_LPQ;
+ 	case SIXQUAT_HDR:
+-		sensor_ind = SENSOR_SIXQ;
+-		break;
++		return SENSOR_SIXQ;
+ 	case COMPASS_HDR:
+ 	case COMPASS_HDR_2:
+-		sensor_ind = SENSOR_COMPASS;
+-		break;
++		return SENSOR_COMPASS;
+ 	case PRESSURE_HDR:
+-		sensor_ind = SENSOR_PRESSURE;
+-		break;
++		return SENSOR_PRESSURE;
+ 	case STEP_DETECTOR_HDR:
+-		sensor_ind = SENSOR_STEP;
+-		break;
++		return SENSOR_STEP;
+ 	default:
+-		sensor_ind = SENSOR_INVALID;
+-		break;
++		return SENSOR_INVALID;
+ 	}
+-
+-	return sensor_ind;
+ }
+ 
+ static int inv_process_batchmode(struct inv_mpu_state *st)
+@@ -1528,9 +1519,10 @@
+ 	u64 t;
+ 	bool done_flag;
+ 
+-	if (1024 <= st->fifo_count) {
+-		if (1024 < st->fifo_count) {
+-			pr_err("fifo_count over spec. %d\n",st->fifo_count);
++	if (HARDWARE_FIFO_SIZE <= st->fifo_count) {
++		if (HARDWARE_FIFO_SIZE < st->fifo_count) {
++			pr_err("%s: fifo_count over spec. %d\n", __func__,
++				st->fifo_count);
+ 			st->chip_config.is_overflow = 1;
+ 			return 0;
+ 		}
+@@ -1539,8 +1531,8 @@
+ 	}
+ 	d = fifo_data;
+ 	if (st->left_over_size > 0) {
+-		if(st->left_over_size > HEADERED_Q_BYTES) {
+-			pr_err("left_over_size overflow %d \n", __LINE__);
++		if (st->left_over_size > HEADERED_Q_BYTES) {
++			pr_err("%s: left_over_size overflow 1\n", __func__);
+ 			st->left_over_size = HEADERED_Q_BYTES;
+ 		}
+ 		dptr = d + st->left_over_size;
+@@ -1564,8 +1556,9 @@
+ 	done_flag = false;
+ 	target_bytes = st->fifo_count + st->left_over_size;
+ 	counter = 0;
+-	while ((dptr - d <= target_bytes - HEADERED_NORMAL_BYTES) &&
+-							(!done_flag)) {
++
++	while (((dptr - d) <= (target_bytes - HEADERED_NORMAL_BYTES))
++			&& (!done_flag)) {
+ 		hdr = (u16)be16_to_cpup((__be16 *)(dptr));
+ 		steps = (hdr & STEP_INDICATOR_MASK);
+ 		hdr &= (~STEP_INDICATOR_MASK);
+@@ -1577,7 +1570,7 @@
+ 			continue;
+ 		}
+ 		/* incomplete packet */
+-		if (target_bytes - (dptr - d) <
++		if ((target_bytes - (dptr - d)) <
+ 					st->sensor[sensor_ind].sample_size) {
+ 			done_flag = true;
+ 			continue;
+@@ -1617,16 +1610,14 @@
+ 		if (sensor_ind == SENSOR_PRESSURE) {
+ 			if (!st->chip_config.normal_pressure_measure) {
+ 				st->chip_config.normal_pressure_measure = 1;
+-				dptr += HEADERED_NORMAL_BYTES;
+-				continue;
+-			}
++			} else {
+ 			for (i = 0; i < 6; i++)
+ 				st->fifo_data[i] = dptr[i + 2];
+ 			res = st->slave_pressure->read_data(st, sen);
+ 			if (!res)
+ 				inv_push_8bytes_buffer(st, hdr |
+ 							(!!steps), t, sen);
+-
++			}
+ 			dptr += HEADERED_NORMAL_BYTES;
+ 			continue;
+ 		}
+@@ -1653,8 +1644,8 @@
+ 	st->left_over_size = target_bytes - (dptr - d);
+ 
+ 	if (st->left_over_size) {
+-		if(st->left_over_size > HEADERED_Q_BYTES) {
+-			pr_err("left_over_size overflow %d \n" ,__LINE__);
++		if (st->left_over_size > HEADERED_Q_BYTES) {
++			pr_err("%s: left_over_size overflow 2\n", __func__);
+ 			st->left_over_size = HEADERED_Q_BYTES;
+ 		}
+ 		memcpy(st->left_over, dptr, st->left_over_size);
+@@ -1713,14 +1704,13 @@
+ 	u64 pts1;
+ 
+ 		result = inv_i2c_read(st, REG_INT_ENABLE, 1, &data[0]);
+-
+ 		if (result)
+ 			goto end_session;
+ 
+-	if(st->reactive_enable && (data[0]&0x40)) {
++	if (st->reactive_enable && (data[0] & BIT_MOT_INT))
+ 		inv_process_motion(st);
+-	}
+-	if((data[0] & ~0x40) == 0x0)
++
++	if ((data[0] & ~BIT_MOT_INT) == 0x00)
+ 			goto end_session;
+ 
+ #define DMP_MIN_RUN_TIME (37 * NSEC_PER_MSEC)
+@@ -1751,8 +1741,8 @@
+ 		st->mot_int.mot_on))
+ 		goto end_session;
+ 	if (st->chip_config.lpa_mode) {
+-		result = inv_i2c_read(st, reg->raw_accel,
+-						BYTES_PER_SENSOR, data);
++		result = inv_i2c_read(st, reg->raw_accel, BYTES_PER_SENSOR,
++			data);
+ 		if (result)
+ 			goto end_session;
+ 		inv_report_gyro_accel(indio_dev, data, get_time_ns());
+@@ -1776,12 +1766,10 @@
+ 			goto end_session;
+ 		fifo_count = be16_to_cpup((__be16 *)(data));
+ 		/* fifo count can't be odd number */
+-		if (fifo_count & 1)  {	
++		if (fifo_count & 1)
+ 				goto flush_fifo;
+-			}
+-		if (fifo_count == 0) {
++		if (fifo_count == 0)
+ 			goto end_session;
+-		}
+ 		st->fifo_count = fifo_count;
+ 	}
+ 	
+@@ -1924,7 +1912,7 @@
+ {
+ 	struct inv_mpu_state *st = iio_priv(indio_dev);
+ 	struct inv_reg_map_s *reg;
+-	u8 data[2];
++	u8 data[FIFO_COUNT_BYTE];
+ 	int result;
+ 
+ 	reg = &st->reg;
+@@ -1995,4 +1983,3 @@
+ 
+ 	return ret;
+ }
+-
+diff -X dontdiff -Nuarb a/drivers/staging/iio/imu/mpu_primary/inv_mpu_core.c b/drivers/staging/iio/imu/mpu_primary/inv_mpu_core.c
+--- a/drivers/staging/iio/imu/mpu_primary/inv_mpu_core.c	2016-01-06 15:00:43.145590574 -0500
++++ b/drivers/staging/iio/imu/mpu_primary/inv_mpu_core.c	2015-12-01 05:57:01.000000000 -0500
+@@ -54,11 +54,35 @@
+ extern unsigned int system_rev;
+ #endif
+ 
++void adjust_delay(u64 *delay_ns_p, int *data_p)
++{
++	u64 delay_ns = 0;
++	int data = *data_p;
++
++	delay_ns = div64_long(1000000000LL, (s64)data);
++
++	if (delay_ns >= SENSOR_NS_DELAY_NORMAL)
++		delay_ns = SENSOR_NS_DELAY_NORMAL;
++	else if (delay_ns <= SENSOR_NS_DELAY_FASTEST)
++		delay_ns = SENSOR_NS_DELAY_FASTEST;
++
++	data = (int)div64_long(1000000000LL, delay_ns);
++	if (data==14)
++		data = 15; // change 14 hz to 15 hz frequency as required
++
++	*delay_ns_p = delay_ns;
++	*data_p = data;
++}
+ s64 get_time_ns(void)
+ {
+ 	struct timespec ts;
+-	ktime_get_ts(&ts);
+-	return timespec_to_ns(&ts);
++	s64 timestamp;
++	ts = ktime_to_timespec(alarm_get_elapsed_realtime());
++	timestamp = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
++	if (timestamp < 0)
++		pr_err("[INV] %s invalid time = %lld\n", __func__, timestamp);
++
++	return timestamp;
+ }
+ 
+ s64 get_time_timeofday(void)
+@@ -512,7 +536,8 @@
+ 		st->tap.thresh = INIT_TAP_THRESHOLD;
+ 		st->tap.min_count = INIT_TAP_MIN_COUNT;
+ 		st->sample_divider = INIT_SAMPLE_DIVIDER;
+-		st->smd.threshold = MPU_INIT_SMD_THLD;
++
++		st->smd.threshold = 0;
+ 		st->smd.delay     = MPU_INIT_SMD_DELAY_THLD;
+ 		st->smd.delay2    = MPU_INIT_SMD_DELAY2_THLD;
+ 		st->ped.int_thresh = INIT_PED_INT_THRESH;
+@@ -681,8 +706,11 @@
+  */
+ static int inv_fifo_rate_store(struct inv_mpu_state *st, int fifo_rate)
+ {
+-	if ((fifo_rate < MIN_FIFO_RATE) || (fifo_rate > MAX_FIFO_RATE))
+-		return -EINVAL;
++	if (fifo_rate < MIN_FIFO_RATE)
++		fifo_rate = MIN_FIFO_RATE;
++	else if (fifo_rate > MAX_FIFO_RATE)
++		fifo_rate = MAX_FIFO_RATE;
++
+ 	if (fifo_rate == st->chip_config.fifo_rate)
+ 		return 0;
+ 
+@@ -835,6 +863,7 @@
+ 	struct inv_mpu_state *st = iio_priv(indio_dev);
+ 	struct iio_dev_attr *this_attr = to_iio_dev_attr(attr);
+ 	int result, data;
++	u64 delay_ns = 0;
+ 
+ 	if (st->chip_config.enable)
+ 		return -EBUSY;
+@@ -856,8 +885,10 @@
+ 		st->chip_config.step_indicator_on = !!data;
+ 		break;
+ 	case ATTR_DMP_BATCHMODE_TIMEOUT:
+-		if (data < 0 || data > INT_MAX)
+-			return -EINVAL;
++		if (data > INT_MAX)
++			data = INT_MAX;
++		else if (data < 0)
++			data = 0;
+ 		st->batch.timeout = data;
+ 		break;
+ 	case ATTR_DMP_BATCHMODE_WAKE_FIFO_FULL:
+@@ -865,31 +896,37 @@
+ 		st->batch.overflow_on = 0;
+ 		break;
+ 	case ATTR_DMP_SIX_Q_ON:
++		if (!!data && (!!data != st->sensor[SENSOR_SIXQ].on))
++			st->sensor[SENSOR_SIXQ].old_ts = 0;
+ 		st->sensor[SENSOR_SIXQ].on = !!data;
+ 		break;
+ 	case ATTR_DMP_SIX_Q_RATE:
+-		if (data > MPU_DEFAULT_DMP_FREQ || data < 0)
+-			return -EINVAL;
++		adjust_delay(&delay_ns, &data);
++		st->sensor[SENSOR_SIXQ].delay_ns = delay_ns;
+ 		st->sensor[SENSOR_SIXQ].rate = data;
+ 		st->sensor[SENSOR_SIXQ].dur = MPU_DEFAULT_DMP_FREQ / data;
+ 		st->sensor[SENSOR_SIXQ].dur *= DMP_INTERVAL_INIT;
+ 		break;
+ 	case ATTR_DMP_LPQ_ON:
++		if (!!data && (!!data != st->sensor[SENSOR_LPQ].on))
++			st->sensor[SENSOR_LPQ].old_ts = 0;
+ 		st->sensor[SENSOR_LPQ].on = !!data;
+ 		break;
+ 	case ATTR_DMP_LPQ_RATE:
+-		if (data > MPU_DEFAULT_DMP_FREQ || data < 0)
+-			return -EINVAL;
++		adjust_delay(&delay_ns, &data);
++		st->sensor[SENSOR_LPQ].delay_ns = delay_ns;
+ 		st->sensor[SENSOR_LPQ].rate = data;
+ 		st->sensor[SENSOR_LPQ].dur = MPU_DEFAULT_DMP_FREQ / data;
+ 		st->sensor[SENSOR_LPQ].dur *= DMP_INTERVAL_INIT;
+ 		break;
+ 	case ATTR_DMP_PED_Q_ON:
++		if (!!data && (!!data != st->sensor[SENSOR_PEDQ].on))
++			st->sensor[SENSOR_PEDQ].old_ts = 0;
+ 		st->sensor[SENSOR_PEDQ].on = !!data;
+ 		break;
+ 	case ATTR_DMP_PED_Q_RATE:
+-		if (data > MPU_DEFAULT_DMP_FREQ || data < 0)
+-			return -EINVAL;
++		adjust_delay(&delay_ns, &data);
++		st->sensor[SENSOR_PEDQ].delay_ns = delay_ns;
+ 		st->sensor[SENSOR_PEDQ].rate = data;
+ 		st->sensor[SENSOR_PEDQ].dur = MPU_DEFAULT_DMP_FREQ / data;
+ 		st->sensor[SENSOR_PEDQ].dur *= DMP_INTERVAL_INIT;
+@@ -1017,6 +1054,8 @@
+ 	struct inv_mpu_state *st = iio_priv(indio_dev);
+ 	struct iio_dev_attr *this_attr = to_iio_dev_attr(attr);
+ 	int result, data;
++	u8 sc_buf[IIO_BUFFER_BYTES];
++	u16 hdr;
+ 
+ 	if (st->chip_config.enable)
+ 		return -EBUSY;
+@@ -1042,9 +1081,16 @@
+ 		result = inv_enable_pedometer(st, !!data);
+ 
+ 		/*reset internal pedometer step buffer*/
+-		if (!!data)
++		if(!!data) {
+ 			result = inv_reset_pedometer_internal_timer(st);
+-		else
++			// Sending dummy data to begin polling at HAL
++			hdr = STEP_COUNTER_HDR;
++			memcpy(sc_buf, &hdr, sizeof(hdr));
++			mutex_lock(&st->iio_buf_write_lock);
++			iio_push_to_buffer(indio_dev->buffer, sc_buf, 0);
++			mutex_unlock(&st->iio_buf_write_lock);
++			pr_info("step counter dummy data sent\n");
++		} else
+ 			st->shealth.interrupt_mask = 0;
+ 		if (result)
+ 			goto dmp_mem_store_fail;
+@@ -1086,10 +1132,14 @@
+ 	case ATTR_DMP_SMD_THLD:
+ 		if (data < 0 || data > SHRT_MAX)
+ 			goto dmp_mem_store_fail;
+-		result = write_be32_key_to_mem(st, data << 16,
++		data = data << 16;
++		result = write_be32_key_to_mem(st, data,
+ 						KEY_SMD_ACCEL_THLD);
+ 		if (result)
+ 			goto dmp_mem_store_fail;
++		cpu_to_be32s(&data);
++		if (result)
++			goto dmp_mem_store_fail;
+ 		st->smd.threshold = data;
+ 		break;
+ 	case ATTR_DMP_SMD_DELAY_THLD:
+@@ -2021,6 +2071,7 @@
+ 	int data;
+ 	u8 d, axis;
+ 	int result;
++	u64 delay_ns = 0;
+ 
+ 	result = 0;
+ 	if (st->chip_config.enable)
+@@ -2147,6 +2198,8 @@
+ 		}
+ 		st->self_test.threshold = data;
+ 	case ATTR_GYRO_ENABLE:
++		if (!!data && (!!data != st->chip_config.gyro_enable))
++			st->sensor[SENSOR_GYRO].old_ts = 0;
+ 		st->chip_config.gyro_enable = !!data;
+ 		if (st->chip_config.gyro_enable)
+ 			gyro_open_calibration(st);
+@@ -2155,11 +2208,15 @@
+ 		st->sensor[SENSOR_GYRO].on = !!data;
+ 		break;
+ 	case ATTR_GYRO_RATE:
++		adjust_delay(&delay_ns, &data);
++		st->sensor[SENSOR_GYRO].delay_ns = delay_ns;
+ 		st->sensor[SENSOR_GYRO].rate = data;
+ 		st->sensor[SENSOR_GYRO].dur  = MPU_DEFAULT_DMP_FREQ / data;
+ 		st->sensor[SENSOR_GYRO].dur  *= DMP_INTERVAL_INIT;
+ 		break;
+ 	case ATTR_ACCEL_ENABLE:
++		if (!!data && (!!data != st->chip_config.accel_enable))
++			st->sensor[SENSOR_ACCEL].old_ts = 0;
+ 		st->chip_config.accel_enable = !!data;
+ 		if (st->chip_config.accel_enable)
+ 			accel_open_calibration(st);
+@@ -2168,14 +2225,19 @@
+ 		st->sensor[SENSOR_ACCEL].on = !!data;
+ 		break;
+ 	case ATTR_ACCEL_RATE:
++		adjust_delay(&delay_ns, &data);
++		st->sensor[SENSOR_ACCEL].delay_ns = delay_ns;
+ 		st->sensor[SENSOR_ACCEL].rate = data;
+ 		st->sensor[SENSOR_ACCEL].dur  = MPU_DEFAULT_DMP_FREQ / data;
+ 		st->sensor[SENSOR_ACCEL].dur  *= DMP_INTERVAL_INIT;
+ 		break;
+ 	case ATTR_COMPASS_ENABLE:
++		if (!!data && (!!data != st->sensor[SENSOR_COMPASS].on))
++			st->sensor[SENSOR_COMPASS].old_ts = 0;
+ 		st->sensor[SENSOR_COMPASS].on = !!data;
+ 		break;
+ 	case ATTR_COMPASS_RATE:
++		adjust_delay(&delay_ns, &data);
+ 		if (data <= 0) {
+ 			result = -EINVAL;
+ 			goto attr_store_fail;
+@@ -2183,14 +2245,18 @@
+ 		if ((MSEC_PER_SEC / st->slave_compass->rate_scale) < data)
+ 			data = MSEC_PER_SEC / st->slave_compass->rate_scale;
+ 
++		st->sensor[SENSOR_COMPASS].delay_ns = delay_ns;
+ 		st->sensor[SENSOR_COMPASS].rate = data;
+ 		st->sensor[SENSOR_COMPASS].dur  = MPU_DEFAULT_DMP_FREQ / data;
+ 		st->sensor[SENSOR_COMPASS].dur  *= DMP_INTERVAL_INIT;
+ 		break;
+ 	case ATTR_PRESSURE_ENABLE:
++		if (!!data && (!!data != st->sensor[SENSOR_PRESSURE].on))
++			st->sensor[SENSOR_PRESSURE].old_ts = 0;
+ 		st->sensor[SENSOR_PRESSURE].on = !!data;
+ 		break;
+ 	case ATTR_PRESSURE_RATE:
++		adjust_delay(&delay_ns, &data);
+ 		if (data <= 0) {
+ 			result = -EINVAL;
+ 			goto attr_store_fail;
+@@ -2198,6 +2264,7 @@
+ 		if ((MSEC_PER_SEC / st->slave_pressure->rate_scale) < data)
+ 			data = MSEC_PER_SEC / st->slave_pressure->rate_scale;
+ 
++		st->sensor[SENSOR_PRESSURE].delay_ns = delay_ns;
+ 		st->sensor[SENSOR_PRESSURE].rate = data;
+ 		st->sensor[SENSOR_PRESSURE].dur  = MPU_DEFAULT_DMP_FREQ / data;
+ 		st->sensor[SENSOR_PRESSURE].dur  *= DMP_INTERVAL_INIT;
+@@ -2209,6 +2276,7 @@
+ 		result = inv_firmware_loaded(st, data);
+ 		break;
+ 	case ATTR_SAMPLING_FREQ:
++		adjust_delay(&delay_ns, &data);
+ 		result = inv_fifo_rate_store(st, data);
+ 		break;
+ #ifdef CONFIG_INV_TESTING
+@@ -4032,6 +4100,7 @@
+ 		pr_err("%s : inv_check_chip_type\n", __func__);
+ 		goto out_free;
+ 	}
++	pr_info("[SENSOR] %s - chip_type=%d\n", __func__, st->chip_type);
+ 
+ 	result = st->init_config(indio_dev);
+ 	if (result) {
+@@ -4095,6 +4164,8 @@
+ 	INIT_KFIFO(st->timestamps);
+ 	spin_lock_init(&st->time_stamp_lock);
+ 	mutex_init(&st->suspend_resume_lock);
++	mutex_init(&st->iio_buf_write_lock);
++	mutex_init(&st->iio_batch_lock);
+ 	wake_lock_init(&st->shealth.wake_lock, WAKE_LOCK_SUSPEND, "inv_iio");
+ 
+ 	result = st->set_power_state(st, false);
+@@ -4142,6 +4213,8 @@
+ #endif
+ 
+ out_remove_dmp_sysfs:
++	mutex_destroy(&st->iio_batch_lock);
++	mutex_destroy(&st->iio_buf_write_lock);
+ 	mutex_destroy(&st->suspend_resume_lock);
+ 	kfifo_free(&st->timestamps);
+ out_unreg_iio:
+diff -X dontdiff -Nuarb a/drivers/staging/iio/imu/mpu_primary/inv_mpu_iio.h b/drivers/staging/iio/imu/mpu_primary/inv_mpu_iio.h
+--- a/drivers/staging/iio/imu/mpu_primary/inv_mpu_iio.h	2016-01-06 15:00:43.145590574 -0500
++++ b/drivers/staging/iio/imu/mpu_primary/inv_mpu_iio.h	2015-12-01 05:57:01.000000000 -0500
+@@ -20,6 +20,7 @@
+ #include <linux/spinlock.h>
+ #include <linux/wakelock.h>
+ #include <linux/mpu.h>
++#include <linux/math64.h>
+ 
+ #include "iio.h"
+ #include "buffer.h"
+@@ -218,6 +219,7 @@
+ #define PEDQUAT_HDR              0x0200
+ #define STEP_DETECTOR_HDR        0x0100
+ #define STEP_INDICATOR_MASK      0xf
++#define STEP_COUNTER_HDR         0xfff0
+ 
+ #define MAX_BYTES_PER_SAMPLE     80
+ #define MAX_HW_FIFO_BYTES        (BYTES_PER_SENSOR * 2)
+@@ -297,7 +299,6 @@
+ 
+ #define MPU_INIT_SMD_DELAY_THLD  3
+ #define MPU_INIT_SMD_DELAY2_THLD 1
+-#define MPU_INIT_SMD_THLD        1500
+ #define MPU_DEFAULT_DMP_FREQ     200
+ #define MPL_PROD_KEY(ver, rev)  (ver * 100 + rev)
+ #define NUM_OF_PROD_REVS (ARRAY_SIZE(prod_rev_map))
+@@ -448,6 +449,12 @@
+ 	SENSOR_INVALID,
+ };
+ 
++/* Sensor Sampling Time */
++enum {
++	SENSOR_NS_DELAY_FASTEST = 5000000,	/* 5msec */
++	SENSOR_NS_DELAY_NORMAL = 200000000,	/* 200msec */
++};
++
+ /**
+  *  struct inv_sensor - information for each sensor.
+  *  @ts: this sensors timestamp.
+@@ -461,8 +468,12 @@
+  */
+ struct inv_sensor {
+ 	u64 ts;
++	u64 old_ts;
+ 	int dur;
+ 	int rate;
++	u64 delay_ns;
++	int sample_count;
++	u64 batch_irq_time;
+ 	int counter;
+ 	bool on;
+ 	u8 sample_size;
+@@ -817,6 +828,8 @@
+ 	enum   inv_devices chip_type;
+ 	spinlock_t time_stamp_lock;
+ 	struct mutex suspend_resume_lock;
++	struct mutex iio_buf_write_lock;
++	struct mutex iio_batch_lock;
+ 	struct i2c_client *client;
+ 	struct mpu_platform_data plat_data;
+ 	struct inv_mpu_slave *slave_accel;
+@@ -1158,6 +1171,7 @@
+ int inv_hw_self_test(struct inv_mpu_state *st);
+ s64 get_time_ns(void);
+ s64 get_time_timeofday(void);
++void adjust_delay(u64 *delay_ns_p, int *data_p);
+ 
+ int write_be32_key_to_mem(struct inv_mpu_state *st, u32 data, int key);
+ 
+diff -X dontdiff -Nuarb a/drivers/staging/iio/imu/mpu_primary/inv_mpu_ring.c b/drivers/staging/iio/imu/mpu_primary/inv_mpu_ring.c
+--- a/drivers/staging/iio/imu/mpu_primary/inv_mpu_ring.c	2016-01-06 15:00:43.145590574 -0500
++++ b/drivers/staging/iio/imu/mpu_primary/inv_mpu_ring.c	2015-12-01 05:57:01.000000000 -0500
+@@ -39,6 +39,93 @@
+ 
+ static u8 fifo_data[HARDWARE_FIFO_SIZE + HEADERED_Q_BYTES];
+ static int inv_process_batchmode(struct inv_mpu_state *st);
++static u64 check_timestamp(struct inv_mpu_state *st, u16 hdr, u8 *buf_data1, u8 *buf_data2, u64 t);
++static int inv_parse_header(u16 hdr);
++static void get_sample_count_per_sensor(struct inv_mpu_state *st, u8 *dptr, u8 *d, int target_bytes);
++
++static void get_sample_count_per_sensor(struct inv_mpu_state *st, u8 *dptr, u8 *d, int target_bytes)
++{
++	u16 hdr;
++	int sensor_ind;
++
++	st->sensor[SENSOR_GYRO].sample_count = st->sensor[SENSOR_GYRO].batch_irq_time = 0;
++	st->sensor[SENSOR_ACCEL].sample_count = st->sensor[SENSOR_ACCEL].batch_irq_time = 0;
++	st->sensor[SENSOR_PRESSURE].sample_count = st->sensor[SENSOR_PRESSURE].batch_irq_time = 0;
++	st->sensor[SENSOR_SIXQ].sample_count = st->sensor[SENSOR_SIXQ].batch_irq_time = 0;
++	st->sensor[SENSOR_LPQ].sample_count = st->sensor[SENSOR_LPQ].batch_irq_time = 0;
++	
++	while ((dptr - d) <= (target_bytes - HEADERED_NORMAL_BYTES)) {
++
++		hdr = (u16)be16_to_cpup((__be16 *)(dptr));
++		hdr &= (~STEP_INDICATOR_MASK);
++		sensor_ind = inv_parse_header(hdr);
++
++		if (sensor_ind == SENSOR_INVALID) {
++			dptr += (HEADERED_NORMAL_BYTES / 4);
++			pr_err("sensor_ind == SENSOR_INVALID\n");
++			continue;
++		}
++
++		switch (sensor_ind) 
++		{
++			case SENSOR_GYRO:
++				st->sensor[SENSOR_GYRO].sample_count++;
++				break;
++			case SENSOR_ACCEL:
++				st->sensor[SENSOR_ACCEL].sample_count++;
++				break;
++			case SENSOR_PRESSURE:
++				st->sensor[SENSOR_PRESSURE].sample_count++;
++				break;
++			case SENSOR_SIXQ:
++				st->sensor[SENSOR_SIXQ].sample_count++;
++				break;
++			case SENSOR_LPQ:
++				st->sensor[SENSOR_LPQ].sample_count++;
++				break;
++			default:
++				pr_err("sensor_ind not found\n");
++		}
++
++		dptr += st->sensor[sensor_ind].sample_size;
++	}
++}
++
++static u64 check_timestamp(struct inv_mpu_state *st, u16 hdr, u8 *buf_data1, u8 *buf_data2, u64 t)
++{
++	struct iio_dev *indio_dev = iio_priv_to_dev(st);
++	u8 buf_ts[IIO_BUFFER_BYTES];
++	int ind = inv_parse_header(hdr);
++	u64 t_new = 0;
++	u64 t_old = st->sensor[ind].old_ts;
++	u64 delay_ns = st->sensor[ind].delay_ns;
++	u64 shift_t = 0;
++
++	if (t < t_old) {
++		t = t_old + delay_ns;
++		return t;
++	}
++
++	if (ind == SENSOR_STEP)
++		return t;
++
++	if (t_old && (t - t_old) * 10 > delay_ns * 18) {
++		shift_t = delay_ns >> 1;
++		for (t_new = t_old + delay_ns; t_new < t - shift_t; t_new += delay_ns) {
++			memcpy(buf_ts, &t_new, sizeof(t_new));
++			mutex_lock(&st->iio_buf_write_lock);
++			iio_push_to_buffer(indio_dev->buffer, buf_data1, 0);
++			if (buf_data2)
++				iio_push_to_buffer(indio_dev->buffer, buf_data2, 0);
++			iio_push_to_buffer(indio_dev->buffer, buf_ts, 0);
++			mutex_unlock(&st->iio_buf_write_lock);
++			t_old = t_new;
++		}
++		st->sensor[ind].old_ts = t_old;
++	}
++
++	return t;
++}
+ 
+ static int inv_push_marker_to_buffer(struct inv_mpu_state *st, u16 hdr)
+ {
+@@ -46,7 +133,9 @@
+ 	u8 buf[IIO_BUFFER_BYTES];
+ 
+ 	memcpy(buf, &hdr, sizeof(hdr));
++	mutex_lock(&st->iio_buf_write_lock);
+ 	iio_push_to_buffer(indio_dev->buffer, buf, 0);
++	mutex_unlock(&st->iio_buf_write_lock);
+ 
+ 	return 0;
+ }
+@@ -55,15 +144,28 @@
+ 							u64 t, s16 *d)
+ {
+ 	struct iio_dev *indio_dev = iio_priv_to_dev(st);
+-	u8 buf[IIO_BUFFER_BYTES];
++	u8 buf_data1[IIO_BUFFER_BYTES];
++	u8 buf_ts[IIO_BUFFER_BYTES];
+ 	int i;
++	int ind = inv_parse_header(hdr);
+ 
+-	memcpy(buf, &hdr, sizeof(hdr));
++	memcpy(buf_data1, &hdr, sizeof(hdr));
+ 	for (i = 0; i < 3; i++)
+-		memcpy(&buf[2 + i * 2], &d[i], sizeof(d[i]));
+-	iio_push_to_buffer(indio_dev->buffer, buf, 0);
+-	memcpy(buf, &t, sizeof(t));
+-	iio_push_to_buffer(indio_dev->buffer, buf, 0);
++		memcpy(&buf_data1[2 + i * 2], &d[i], sizeof(d[i]));
++
++	t = check_timestamp(st, hdr, buf_data1, NULL, t);
++
++	memcpy(buf_ts, &t, sizeof(t));
++
++	/* Raw data and timestamp need to be pushed together in iio buffer,
++	 * otherwise marker could be pushed in between raw data and timestamp which disturbs parsing at HAL
++	 */
++	mutex_lock(&st->iio_buf_write_lock);
++	iio_push_to_buffer(indio_dev->buffer, buf_data1, 0);
++	iio_push_to_buffer(indio_dev->buffer, buf_ts, 0);
++	mutex_unlock(&st->iio_buf_write_lock);
++
++	st->sensor[ind].old_ts = t;
+ 
+ 	return 0;
+ }
+@@ -72,17 +174,28 @@
+ 									int *q)
+ {
+ 	struct iio_dev *indio_dev = iio_priv_to_dev(st);
+-	u8 buf[IIO_BUFFER_BYTES];
++	u8 buf_data1[IIO_BUFFER_BYTES];
++	u8 buf_data2[IIO_BUFFER_BYTES];
++	u8 buf_ts[IIO_BUFFER_BYTES];
+ 	int i;
++	int ind = inv_parse_header(hdr);
+ 
+-	memcpy(buf, &hdr, sizeof(hdr));
+-	memcpy(buf + 4, &q[0], sizeof(q[0]));
+-	iio_push_to_buffer(indio_dev->buffer, buf, 0);
++	memcpy(buf_data1, &hdr, sizeof(hdr));
++	memcpy(buf_data1 + 4, &q[0], sizeof(q[0]));
+ 	for (i = 0; i < 2; i++)
+-		memcpy(buf + 4 * i, &q[i + 1], sizeof(q[i]));
+-	iio_push_to_buffer(indio_dev->buffer, buf, 0);
+-	memcpy(buf, &t, sizeof(t));
+-	iio_push_to_buffer(indio_dev->buffer, buf, 0);
++		memcpy(buf_data2 + 4 * i, &q[i + 1], sizeof(q[i]));
++
++	t = check_timestamp(st, hdr, buf_data1, buf_data2, t);
++
++	memcpy(buf_ts, &t, sizeof(t));
++
++	mutex_lock(&st->iio_buf_write_lock);
++	iio_push_to_buffer(indio_dev->buffer, buf_data1, 0);
++	iio_push_to_buffer(indio_dev->buffer, buf_data2, 0);
++	iio_push_to_buffer(indio_dev->buffer, buf_ts, 0);
++	mutex_unlock(&st->iio_buf_write_lock);
++
++	st->sensor[ind].old_ts = t;
+ 
+ 	return 0;
+ }
+@@ -1047,7 +1160,9 @@
+ 				return result;
+ 			st->fifo_count = be16_to_cpup((__be16 *)(data));
+ 			if (st->fifo_count) {
++				mutex_lock(&st->iio_batch_lock);
+ 				result = inv_process_batchmode(st);
++				mutex_unlock(&st->iio_batch_lock);
+ 				if (result)
+ 					return result;
+ 			}
+@@ -1353,22 +1468,30 @@
+ 
+ static int inv_get_timestamp(struct inv_mpu_state *st, int count)
+ {
++	u64 ts;
++	s32 result;
++	result = kfifo_out(&st->timestamps, &ts, 1);
++	st->prev_ts = ts;
++	st->last_ts = ts;
++	return 0;
++
++/*
+ 	u32 *dur;
+ 	u32 thresh;
+ 	s32 diff, result, counter;
+-	u64 ts;
+ 
+-	/* goal of algorithm is to estimate the true frequency of the chip */
++	// goal of algorithm is to estimate the true frequency of the chip
+ 	if (st->chip_config.dmp_on && st->chip_config.dmp_event_int_on)
+ 		return 0;
+ 	dur = &st->irq_dur_ns;
+ 	counter = 1;
+ 	thresh = min((u32)((*dur) >> 2), (u32)(10 * NSEC_PER_MSEC));
++
+ 	while (kfifo_len(&st->timestamps) >= count) {
+ 		result = kfifo_out(&st->timestamps, &ts, 1);
+ 		if (result != 1)
+ 			return -EINVAL;
+-		/* first time since reset fifo, just take it */
++		// first time since reset fifo, just take it
+ 		if (!st->ts_counter) {
+ 			st->last_ts = ts;
+ 			st->prev_ts = ts;
+@@ -1391,6 +1514,8 @@
+ 	st->last_ts += ts;
+ 
+ 	return 0;
++*/
++
+ }
+ 
+ static int inv_process_dmp_interrupt(struct inv_mpu_state *st)
+@@ -1577,6 +1702,7 @@
+ 	u16 hdr, steps;
+ 	s16 sen[3];
+ 	u64 t;
++	u64 batch_irq_time;
+ 	bool done_flag;
+ 
+ #if FEATURE_IKR_PANIC
+@@ -1609,6 +1735,7 @@
+ 		dptr = d;
+ 	}
+ 	target_bytes = st->fifo_count;
++
+ 	while (target_bytes > 0) {
+ 		if (target_bytes < MAX_READ_SIZE)
+ 			tmp = target_bytes;
+@@ -1624,6 +1751,11 @@
+ 	done_flag = false;
+ 	target_bytes = st->fifo_count + st->left_over_size;
+ 	counter = 0;
++	batch_irq_time = (u64)get_time_ns();
++
++	if (st->batch.on)
++		get_sample_count_per_sensor(st, dptr, d, target_bytes);
++
+ 	while (((dptr - d) <= (target_bytes - HEADERED_NORMAL_BYTES)) &&
+ 							(!done_flag)) {
+ 		hdr = (u16)be16_to_cpup((__be16 *)(dptr));
+@@ -1643,17 +1775,29 @@
+ 			continue;
+ 		}
+ 		if (sensor_ind == SENSOR_STEP) {
+-			tmp = (int)be32_to_cpup((__be32 *)(dptr + 4));
+-			t = st->step_detector_base_ts +
+-					(u64)tmp * 5 * NSEC_PER_MSEC;
++			t = batch_irq_time;
+ 			inv_push_8bytes_buffer(st, hdr, t, sen);
+ 			dptr += HEADERED_NORMAL_BYTES;
+ 			continue;
+ 		}
+ 		if (steps > 1)
+ 			inv_push_step_indicator(st, sensor_ind, steps);
+-		st->sensor[sensor_ind].ts += (u64)st->sensor[sensor_ind].dur;
++
++		st->sensor[sensor_ind].ts = batch_irq_time;
+ 		t = st->sensor[sensor_ind].ts;
++
++		if (st->batch.on) {
++			if (!st->sensor[sensor_ind].batch_irq_time)
++				st->sensor[sensor_ind].batch_irq_time = batch_irq_time;
++
++			if (st->sensor[sensor_ind].sample_count > 1)
++				t = st->sensor[sensor_ind].batch_irq_time - (st->sensor[sensor_ind].sample_count-1)*(st->sensor[sensor_ind].delay_ns);
++			else
++				t = st->sensor[sensor_ind].batch_irq_time;
++
++			st->sensor[sensor_ind].sample_count--;
++		}
++
+ 		if (sensor_ind == SENSOR_COMPASS) {
+ 			if (!st->chip_config.normal_compass_measure) {
+ 				st->chip_config.normal_compass_measure = 1;
+@@ -1780,7 +1924,7 @@
+ 			goto end_session;
+ 	}
+ 
+-#define DMP_MIN_RUN_TIME (37 * NSEC_PER_MSEC)
++//#define DMP_MIN_RUN_TIME (37 * NSEC_PER_MSEC)
+ 	if (st->suspend_state)
+ 		return IRQ_HANDLED;
+ 	if (st->chip_config.dmp_on) {
+@@ -1789,10 +1933,13 @@
+ 		if (result || st->chip_config.dmp_event_int_on)
+ 			goto end_session;
+ 		if (!st->chip_config.smd_triggered) {
++			st->last_run_time = pts1;
++			/*
+ 			if (pts1 - st->last_run_time < DMP_MIN_RUN_TIME)
+ 				goto end_session;
+ 			else
+ 				st->last_run_time = pts1;
++			*/
+ 		} else {
+ 			st->chip_config.smd_triggered = false;
+ 		}
+@@ -1843,7 +1990,9 @@
+ 	}
+ 
+ 	if (st->chip_config.dmp_on) {
++		mutex_lock(&st->iio_batch_lock);
+ 		result = inv_process_batchmode(st);
++		mutex_unlock(&st->iio_batch_lock);
+ 	} else {
+ 		if (fifo_count >  FIFO_THRESHOLD)
+ 			goto flush_fifo;
+@@ -1999,7 +2148,9 @@
+ 			return result;
+ 		st->fifo_count = be16_to_cpup((__be16 *)(data));
+ 		if (st->fifo_count) {
++			mutex_lock(&st->iio_batch_lock);
+ 			result = inv_process_batchmode(st);
++			mutex_unlock(&st->iio_batch_lock);
+ 			if (result)
+ 				return result;
+ 			*has_data = !!st->fifo_count;
+diff -X dontdiff -Nuarb a/drivers/staging/iio/magnetometer/yas.h b/drivers/staging/iio/magnetometer/yas.h
+--- a/drivers/staging/iio/magnetometer/yas.h	2016-01-06 15:00:43.148590574 -0500
++++ b/drivers/staging/iio/magnetometer/yas.h	2015-12-01 05:56:54.000000000 -0500
+@@ -63,6 +63,10 @@
+ #define YAS_ERROR_DIRCALC		(-9) /*!< Direction calcuration error */
+ #define YAS_ERROR_ERROR			(-128) /*!< other error */
+ 
++#define DEV_NAME			"yas532"
++#define VENDOR_NAME			"YAMAHA"
++#define MODULE_NAME_MAG			"magnetic_sensor"
++
+ #ifndef NULL
+ #ifdef __cplusplus
+ #define NULL				(0) /*!< NULL */
+diff -X dontdiff -Nuarb a/drivers/staging/iio/magnetometer/yas_mag_kernel.c b/drivers/staging/iio/magnetometer/yas_mag_kernel.c
+--- a/drivers/staging/iio/magnetometer/yas_mag_kernel.c	2016-01-06 15:00:43.148590574 -0500
++++ b/drivers/staging/iio/magnetometer/yas_mag_kernel.c	2015-12-01 05:57:01.000000000 -0500
+@@ -43,12 +43,8 @@
+ #include "trigger_consumer.h"
+ #include "yas.h"
+ 
+-#if defined(CONFIG_SENSORS)
+ #include <linux/sensor/sensors_core.h>
+ 
+-#define VENDOR_NAME			"YAMAHA"
+-#define CHIP_NAME			"YAS532"
+-#endif
+ 
+ #if defined(CONFIG_MACH_SLTE_CMCC) || defined(CONFIG_MACH_SLTE_CU) || defined(CONFIG_MACH_SLTE_TD) \
+ || defined(CONFIG_MACH_SLTE_ATT) || defined(CONFIG_MACH_SLTE_TMO) \
+@@ -73,6 +69,7 @@
+ 	struct delayed_work work;
+ 	struct device *yas_device;
+ 	int16_t sampling_frequency;
++	int poll_delay;
+ 	atomic_t pseudo_irq_enable;
+ 	int32_t compass_data[3];
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+@@ -81,6 +78,22 @@
+ 	int position;
+ };
+ 
++static inline s64 yas_iio_get_boottime_ns(void)
++{
++	struct timespec ts;
++
++	ts = ktime_to_timespec(ktime_get_boottime());
++
++	return timespec_to_ns(&ts);
++}
++
++irqreturn_t yas_iio_pollfunc_store_boottime(int irq, void *p)
++{
++	struct iio_poll_func *pf = p;
++	pf->timestamp = yas_iio_get_boottime_ns();
++	return IRQ_WAKE_THREAD;
++}
++
+ static int yas_device_open(int32_t type)
+ {
+ 	return 0;
+@@ -175,7 +188,7 @@
+ 	struct yas_state *st = iio_priv(indio_dev);
+ 	unsigned long flags;
+ 	spin_lock_irqsave(&st->spin_lock, flags);
+-	iio_trigger_poll(st->trig, iio_get_time_ns());
++	iio_trigger_poll(st->trig, yas_iio_get_boottime_ns());
+ 	spin_unlock_irqrestore(&st->spin_lock, flags);
+ 	return 0;
+ }
+@@ -184,11 +197,12 @@
+ {
+ 	struct iio_poll_func *pf = p;
+ 	struct iio_dev *indio_dev = pf->indio_dev;
+-	struct iio_buffer *buffer = indio_dev->buffer;
+ 	struct yas_state *st = iio_priv(indio_dev);
+-	int len = 0, i, j;
++	struct iio_buffer *buffer = indio_dev->buffer;
+ 	size_t datasize = buffer->access->get_bytes_per_datum(buffer);
++	int len = 0, i, j;
+ 	int32_t *mag;
++	s64 timestamp;
+ 
+ 	mag = (int32_t *) kmalloc(datasize, GFP_KERNEL);
+ 	if (mag == NULL)
+@@ -204,9 +218,9 @@
+ 		len = j * 4;
+ 	}
+ 
+-	/* Guaranteed to be aligned with 8 byte boundary */
+-	if (buffer->scan_timestamp)
+-		*(s64 *)((u8 *)mag + ALIGN(len, sizeof(s64))) = pf->timestamp;
++	timestamp = yas_iio_get_boottime_ns();
++	*(s64 *)((u8 *)mag + ALIGN(len, sizeof(s64))) = timestamp;
++
+ 	iio_push_to_buffer(indio_dev->buffer, (u8 *)mag, 0);
+ 	kfree(mag);
+ done:
+@@ -231,7 +245,7 @@
+ {
+ 	int ret;
+ 	struct yas_state *st = iio_priv(indio_dev);
+-	indio_dev->pollfunc = iio_alloc_pollfunc(&iio_pollfunc_store_time,
++	indio_dev->pollfunc = iio_alloc_pollfunc(&yas_iio_pollfunc_store_boottime,
+ 			&yas_trigger_handler, IRQF_ONESHOT, indio_dev,
+ 			"%s_consumer%d", indio_dev->name, indio_dev->id);
+ 	if (indio_dev->pollfunc == NULL) {
+@@ -321,7 +335,7 @@
+ 	mutex_unlock(&st->lock);
+ 	if (ret < 0)
+ 		return -EFAULT;
+-	return sprintf(buf, "%d\n", ret);
++	return snprintf(buf, PAGE_SIZE, "%d\n", ret);
+ }
+ 
+ static ssize_t yas_position_store(struct device *dev,
+@@ -340,7 +354,7 @@
+ }
+ 
+ #if YAS_MAG_DRIVER == YAS_MAG_DRIVER_YAS532 \
+-	|| YAS_MAG_DRIVER == YAS_MAG_DRIVER_YAS533
++|| YAS_MAG_DRIVER == YAS_MAG_DRIVER_YAS533
+ static ssize_t yas_hard_offset_show(struct device *dev,
+ 		struct device_attribute *attr, char *buf)
+ {
+@@ -353,8 +367,8 @@
+ 	mutex_unlock(&st->lock);
+ 	if (ret < 0)
+ 		return -EFAULT;
+-	return sprintf(buf, "%d %d %d\n", hard_offset[0], hard_offset[1],
+-			hard_offset[2]);
++	return snprintf(buf, PAGE_SIZE, "%d %d %d\n",
++		hard_offset[0], hard_offset[1], hard_offset[2]);
+ }
+ 
+ static ssize_t yas_hard_offset_store(struct device *dev,
+@@ -382,7 +396,7 @@
+ {
+ 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
+ 	struct yas_state *st = iio_priv(indio_dev);
+-	return sprintf(buf, "%d\n", st->sampling_frequency);
++	return snprintf(buf, PAGE_SIZE, "%d\n", st->sampling_frequency);
+ }
+ 
+ static ssize_t yas_sampling_frequency_store(struct device *dev,
+@@ -397,9 +411,22 @@
+ 		return ret;
+ 	if (data <= 0)
+ 		return -EINVAL;
++
++	if ((data != st->sampling_frequency)
++		&& atomic_read(&st->pseudo_irq_enable))
++		cancel_delayed_work_sync(&st->work);
++
+ 	mutex_lock(&st->lock);
+-	st->sampling_frequency = data;
++
++	st->poll_delay = MSEC_PER_SEC / data;
++	st->mag.set_delay(st->poll_delay);
+ 	mutex_unlock(&st->lock);
++	if ((data != st->sampling_frequency)
++			&& atomic_read(&st->pseudo_irq_enable))
++		schedule_delayed_work(&st->work,
++			msecs_to_jiffies(st->poll_delay));
++	st->sampling_frequency = data;
++	pr_info("[SENSOR] %s : %dms\n", __func__, st->poll_delay);
+ 	return count;
+ }
+ 
+@@ -412,7 +439,7 @@
+ 	struct yas_state *st = iio_priv(indio_dev);
+ 	struct yas532_self_test_result r;
+ 	int ret;
+-	s8 err[7] = { 0, };
++	s8 err[7] = {0, };
+ 	mutex_lock(&st->lock);
+ 	ret = st->mag.ext(YAS532_SELF_TEST, &r);
+ 	mutex_unlock(&st->lock);
+@@ -446,7 +473,7 @@
+ 		r.xy1y2[2], err[4], r.dir, err[5], r.sx, r.sy,
+ 		err[6], r.xyz[0], r.xyz[1], r.xyz[2], err[1]);
+ 
+-	return sprintf(buf,
++	return snprintf(buf, PAGE_SIZE,
+ 			"%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+ 			err[0], r.id, err[2], err[3], r.xy1y2[0],
+ 			r.xy1y2[1], r.xy1y2[2], err[4], r.dir,
+@@ -466,24 +493,18 @@
+ 	mutex_unlock(&st->lock);
+ 	if (ret < 0)
+ 		return -EFAULT;
+-	return sprintf(buf, "%d,%d,%d\n", xyz_raw[0], xyz_raw[1], xyz_raw[2]);
++	return snprintf(buf, PAGE_SIZE, "%d,%d,%d\n",
++		xyz_raw[0], xyz_raw[1], xyz_raw[2]);
+ }
+ 
+-static ssize_t yas_self_test_noise_store(struct device *dev,
+-		struct device_attribute *attr,
+-		const char *buf, size_t count)
+-{
+-    pr_info("%s: \n", __func__);
+-
+-	return count;
+-}
+ #endif
+ 
+ static int yas_read_raw(struct iio_dev *indio_dev,
+ 		struct iio_chan_spec const *chan,
+ 		int *val,
+ 		int *val2,
+-		long mask) {
++	long mask)
++{
+ 	struct yas_state  *st = iio_priv(indio_dev);
+ 	int ret = -EINVAL;
+ 
+@@ -514,16 +535,13 @@
+ static void yas_work_func(struct work_struct *work)
+ {
+ 	struct yas_data mag[1];
+-	struct yas_state *st =
+-		container_of((struct delayed_work *)work,
++	struct yas_state *st = container_of((struct delayed_work *)work,
+ 				struct yas_state, work);
+ 	struct iio_dev *indio_dev = iio_priv_to_dev(st);
+-	uint32_t time_before, time_after;
+-	int32_t delay;
+ 	int ret, i;
+ 
+-	time_before = jiffies_to_msecs(jiffies);
+ 	mutex_lock(&st->lock);
++
+ 	ret = st->mag.measure(mag, 1);
+ 	if (ret == 1) {
+ 		for (i = 0; i < 3; i++)
+@@ -532,12 +550,10 @@
+ 	mutex_unlock(&st->lock);
+ 	if (ret == 1)
+ 		yas_data_rdy_trig_poll(indio_dev);
+-	time_after = jiffies_to_msecs(jiffies);
+-	delay = MSEC_PER_SEC / st->sampling_frequency
+-		- (time_after - time_before);
+-	if (delay <= 0)
+-		delay = 1;
+-	schedule_delayed_work(&st->work, msecs_to_jiffies(delay));
++	else
++		pr_err("[SENSOR] %s: ret %d\n", __func__, ret);
++
++	schedule_delayed_work(&st->work, msecs_to_jiffies(st->poll_delay));
+ }
+ 
+ #if defined(CONFIG_SENSORS)
+@@ -551,7 +567,7 @@
+ static ssize_t yas53x_name_show(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+-	return snprintf(buf, PAGE_SIZE, "%s\n", CHIP_NAME);
++	return snprintf(buf, PAGE_SIZE, "%s\n", DEV_NAME);
+ }
+ 
+ static ssize_t yas_selftest_show(struct device *dev,
+@@ -594,7 +610,7 @@
+ 		r.xy1y2[2], err[4], r.dir, err[5], r.sx, r.sy,
+ 		err[6], r.xyz[0], r.xyz[1], r.xyz[2], err[1]);
+ 
+-	return sprintf(buf,
++	return snprintf(buf, PAGE_SIZE,
+ 			"%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+ 			err[0], r.id, err[2], err[3], r.xy1y2[0],
+ 			r.xy1y2[1], r.xy1y2[2], err[4], r.dir,
+@@ -608,28 +624,23 @@
+ 	struct yas_state *st = dev_get_drvdata(dev);
+ 	int32_t xyz_raw[3];
+ 	int ret;
++
+ 	mutex_lock(&st->lock);
+ 	ret = st->mag.ext(YAS532_SELF_TEST_NOISE, xyz_raw);
+ 	mutex_unlock(&st->lock);
+ 	if (ret < 0)
+ 		return -EFAULT;
+-	return sprintf(buf, "%d,%d,%d\n", xyz_raw[0], xyz_raw[1], xyz_raw[2]);
+-}
+ 
+-static ssize_t yas_raw_data_store(struct device *dev,
+-		struct device_attribute *attr,
+-		const char *buf, size_t count)
+-{
+-	pr_info("%s: \n", __func__);
+-	return count;
++	return snprintf(buf, PAGE_SIZE, "%d,%d,%d\n",
++		xyz_raw[0], xyz_raw[1], xyz_raw[2]);
+ }
+ 
+ static DEVICE_ATTR(name, S_IRUGO, yas53x_name_show, NULL);
+ static DEVICE_ATTR(vendor, S_IRUGO, yas53x_vendor_show, NULL);
+ static DEVICE_ATTR(selftest, S_IRUSR, yas_selftest_show, NULL);
+-static DEVICE_ATTR(raw_data, S_IRUSR|S_IWUSR, yas_raw_data_show, yas_raw_data_store);
++static DEVICE_ATTR(raw_data, S_IRUSR | S_IWUSR, yas_raw_data_show, NULL);
+ 
+-static struct device_attribute *sensor_attrs[] = {
++static struct device_attribute *mag_sensor_attrs[] = {
+ 	&dev_attr_name,
+ 	&dev_attr_vendor,
+ 	&dev_attr_selftest,
+@@ -665,8 +676,8 @@
+ static IIO_DEVICE_ATTR(hard_offset, S_IRUSR|S_IWUSR,
+ 		yas_hard_offset_show, yas_hard_offset_store, 0);
+ static IIO_DEVICE_ATTR(self_test, S_IRUSR, yas_self_test_show, NULL, 0);
+-static IIO_DEVICE_ATTR(raw_data, S_IRUSR, yas_self_test_noise_show,
+-		yas_self_test_noise_store, 0);
++static IIO_DEVICE_ATTR(self_test_noise, S_IRUSR, yas_self_test_noise_show,
++		NULL, 0);
+ #endif
+ 
+ static struct attribute *yas_attributes[] = {
+@@ -676,7 +687,7 @@
+ 	|| YAS_MAG_DRIVER == YAS_MAG_DRIVER_YAS533
+ 	&iio_dev_attr_hard_offset.dev_attr.attr,
+ 	&iio_dev_attr_self_test.dev_attr.attr,
+-	&iio_dev_attr_raw_data.dev_attr.attr,
++	&iio_dev_attr_self_test_noise.dev_attr.attr,
+ #endif
+ 	NULL
+ };
+@@ -723,7 +734,8 @@
+ 		pr_info("[SENSOR] yas,orientation = %d\n", st->position);
+ 	else
+ 		return -EINVAL;
+-#if defined(CONFIG_MACH_SLTE_CMCC) || defined(CONFIG_MACH_SLTE_CU) || defined(CONFIG_MACH_SLTE_TD)
++#if defined(CONFIG_MACH_SLTE_CMCC) || defined(CONFIG_MACH_SLTE_CU)\
++|| defined(CONFIG_MACH_SLTE_TD)
+ 	if (system_rev < 2)
+ 		st->position = 2;
+ #elif defined(CONFIG_MACH_SLTE_ATT) || defined(CONFIG_MACH_SLTE_TMO) \
+@@ -751,7 +763,7 @@
+ 	}
+ 	i2c_set_clientdata(i2c, indio_dev);
+ 
+-	indio_dev->name = id->name;
++	indio_dev->name = YAS_MAG_NAME;
+ 	indio_dev->dev.parent = &i2c->dev;
+ 	indio_dev->info = &yas_info;
+ 	indio_dev->channels = yas_channels;
+@@ -777,9 +789,10 @@
+ #endif
+ 
+ #ifdef CONFIG_SENSORS
+-    ret = sensors_register(st->yas_device, st, sensor_attrs, "magnetic_sensor");
++	ret = sensors_register(st->yas_device, st, mag_sensor_attrs,
++		MODULE_NAME_MAG);
+     if (ret) {
+-        pr_err("%s: cound not register gyro sensor device(%d).\n",
++		pr_err("%s: cound not register mag sensor device(%d).\n",
+         __func__, ret);
+         goto err_yas_sensor_register_failed;
+     }
+@@ -807,7 +820,7 @@
+ 		goto error_unregister_iio;
+ 	}
+ 	ret = yas_parse_dt(&i2c->dev, st);
+-	if(!ret){
++	if (!ret) {
+ 	    position = st->position;
+ 	    ret = st->mag.set_position(position);
+ 	    pr_info("[SENSOR] set_position (%d)\n", position);
+@@ -826,7 +839,7 @@
+ 	yas_remove_buffer(indio_dev);
+ error_free_dev:
+ #ifdef CONFIG_SENSORS
+-        sensors_unregister(st->yas_device, sensor_attrs);
++	sensors_unregister(st->yas_device, mag_sensor_attrs);
+ err_yas_sensor_register_failed:
+ #endif
+ #ifdef CONFIG_HAS_EARLYSUSPEND

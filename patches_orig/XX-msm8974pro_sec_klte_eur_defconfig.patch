@@ -1,0 +1,24 @@
+diff -Nur -X dontdiff a/arch/arm/configs/msm8974pro_sec_klte_eur_defconfig b/arch/arm/configs/msm8974pro_sec_klte_eur_defconfig
+--- a/arch/arm/configs/msm8974pro_sec_klte_eur_defconfig	2016-01-16 21:57:07.230971290 -0500
++++ b/arch/arm/configs/msm8974pro_sec_klte_eur_defconfig	2016-01-16 21:20:05.006852271 -0500
+@@ -224,3 +224,20 @@
+ 
+ # SAMP : HOTNESS
+ CONFIG_SAMP_HOTNESS=y
++CONFIG_DUALWAVE=y
++CONFIG_SND_TIMER=y
++CONFIG_SND_HRTIMER=y
++CONFIG_SND_USB_AUDIO=y
++CONFIG_SND_ALOOP=y
++GENERIC_TIME_VSYSCALL=y
++GPU_UNIFIED_SYSFS=y
++CONFIG_NEW_UX_MDNIE=y
++CONFIG_NEW_UX_ACL_SUPPORT=y
++CONFIG_FORCE_FAST_CHARGE=y
++CONFIG_KERNEL_MODE_NEON=y
++CONFIG_FRANDOM=y
++CONFIG_MOUSE_PS2=n
++CONFIG_DEFAULT_MMAP_MIN_ADDR=32768
++CONFIG_SECURITY_DMESG_RESTRICT=y
++
++

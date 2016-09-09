@@ -1,0 +1,428 @@
+diff -X dontdiff -Nuarb a/include/linux/videodev2.h b/include/linux/videodev2.h
+--- a/include/linux/videodev2.h	2016-01-10 18:03:08.857454770 -0500
++++ b/include/linux/videodev2.h	2016-01-10 17:23:58.398328884 -0500
+@@ -1196,6 +1196,7 @@
+ 	V4L2_CTRL_TYPE_CTRL_CLASS    = 6,
+ 	V4L2_CTRL_TYPE_STRING        = 7,
+ 	V4L2_CTRL_TYPE_BITMASK       = 8,
++	V4L2_CTRL_TYPE_INTEGER_MENU  = 9,
+ };
+ 
+ /*  Used in the VIDIOC_QUERYCTRL ioctl for querying controls */
+@@ -1519,6 +1520,8 @@
+ #define V4L2_CID_MPEG_VIDEO_VBV_SIZE			(V4L2_CID_MPEG_BASE+222)
+ #define V4L2_CID_MPEG_VIDEO_DEC_PTS			(V4L2_CID_MPEG_BASE+223)
+ #define V4L2_CID_MPEG_VIDEO_DEC_FRAME			(V4L2_CID_MPEG_BASE+224)
++#define V4L2_CID_MPEG_VIDEO_VBV_DELAY                   (V4L2_CID_MPEG_BASE+225)
++
+ 
+ #define V4L2_CID_MPEG_VIDEO_H263_I_FRAME_QP		(V4L2_CID_MPEG_BASE+300)
+ #define V4L2_CID_MPEG_VIDEO_H263_P_FRAME_QP		(V4L2_CID_MPEG_BASE+301)
+@@ -1638,6 +1641,33 @@
+ #define V4L2_CID_MPEG_VIDEO_MPEG4_QPEL		(V4L2_CID_MPEG_BASE+407)
+ #define V4L2_CID_QCOM_VIDEO_SYNC_FRAME_SEQ_HDR		(V4L2_CID_MPEG_BASE+408)
+ 
++/*  Control IDs for VP8 streams
++ *  Although VP8 is not part of MPEG we add these controls to the MPEG class
++ *  as that class is already handling other video compression standards
++ */
++#define V4L2_CID_MPEG_VIDEO_VPX_NUM_PARTITIONS		(V4L2_CID_MPEG_BASE+500)
++enum v4l2_vp8_num_partitions {
++	V4L2_CID_MPEG_VIDEO_VPX_1_PARTITION	= 0,
++	V4L2_CID_MPEG_VIDEO_VPX_2_PARTITIONS	= 1,
++	V4L2_CID_MPEG_VIDEO_VPX_4_PARTITIONS	= 2,
++	V4L2_CID_MPEG_VIDEO_VPX_8_PARTITIONS	= 3,
++};
++#define V4L2_CID_MPEG_VIDEO_VPX_IMD_DISABLE_4X4		(V4L2_CID_MPEG_BASE+501)
++#define V4L2_CID_MPEG_VIDEO_VPX_NUM_REF_FRAMES		(V4L2_CID_MPEG_BASE+502)
++enum v4l2_vp8_num_ref_frames {
++	V4L2_CID_MPEG_VIDEO_VPX_1_REF_FRAME	= 0,
++	V4L2_CID_MPEG_VIDEO_VPX_2_REF_FRAME	= 1,
++	V4L2_CID_MPEG_VIDEO_VPX_3_REF_FRAME	= 2,
++};
++#define V4L2_CID_MPEG_VIDEO_VPX_FILTER_LEVEL		(V4L2_CID_MPEG_BASE+503)
++#define V4L2_CID_MPEG_VIDEO_VPX_FILTER_SHARPNESS	(V4L2_CID_MPEG_BASE+504)
++#define V4L2_CID_MPEG_VIDEO_VPX_GOLDEN_FRAME_REF_PERIOD	(V4L2_CID_MPEG_BASE+505)
++#define V4L2_CID_MPEG_VIDEO_VPX_GOLDEN_FRAME_SEL	(V4L2_CID_MPEG_BASE+506)
++enum v4l2_vp8_golden_frame_sel {
++	V4L2_CID_MPEG_VIDEO_VPX_GOLDEN_FRAME_USE_PREV		= 0,
++	V4L2_CID_MPEG_VIDEO_VPX_GOLDEN_FRAME_USE_REF_PERIOD	= 1,
++};
++
+ /*  MPEG-class control IDs specific to the CX2341x driver as defined by V4L2 */
+ #define V4L2_CID_MPEG_CX2341X_BASE 				(V4L2_CTRL_CLASS_MPEG | 0x1000)
+ #define V4L2_CID_MPEG_CX2341X_VIDEO_SPATIAL_FILTER_MODE 	(V4L2_CID_MPEG_CX2341X_BASE+0)
+@@ -1998,6 +2028,78 @@
+ #define V4L2_CID_IRIS_ABSOLUTE			(V4L2_CID_CAMERA_CLASS_BASE+17)
+ #define V4L2_CID_IRIS_RELATIVE			(V4L2_CID_CAMERA_CLASS_BASE+18)
+ 
++#define V4L2_CID_AUTO_N_PRESET_WHITE_BALANCE	(V4L2_CID_CAMERA_CLASS_BASE+20)
++enum v4l2_auto_n_preset_white_balance {
++	V4L2_WHITE_BALANCE_MANUAL		= 0,
++	V4L2_WHITE_BALANCE_AUTO			= 1,
++	V4L2_WHITE_BALANCE_INCANDESCENT		= 2,
++	V4L2_WHITE_BALANCE_FLUORESCENT		= 3,
++	V4L2_WHITE_BALANCE_FLUORESCENT_H	= 4,
++	V4L2_WHITE_BALANCE_HORIZON		= 5,
++	V4L2_WHITE_BALANCE_DAYLIGHT		= 6,
++	V4L2_WHITE_BALANCE_FLASH		= 7,
++	V4L2_WHITE_BALANCE_CLOUDY		= 8,
++	V4L2_WHITE_BALANCE_SHADE		= 9,
++};
++
++#define V4L2_CID_3A_LOCK			(V4L2_CID_CAMERA_CLASS_BASE+27)
++#define V4L2_LOCK_EXPOSURE			(1 << 0)
++#define V4L2_LOCK_WHITE_BALANCE			(1 << 1)
++#define V4L2_LOCK_FOCUS				(1 << 2)
++
++#define V4L2_CID_ISO_SENSITIVITY		(V4L2_CID_CAMERA_CLASS_BASE+23)
++#define V4L2_CID_ISO_SENSITIVITY_AUTO		(V4L2_CID_CAMERA_CLASS_BASE+24)
++enum v4l2_iso_sensitivity_auto_type {
++	V4L2_ISO_SENSITIVITY_MANUAL		= 0,
++	V4L2_ISO_SENSITIVITY_AUTO		= 1,
++};
++
++#define V4L2_CID_EXPOSURE_METERING		(V4L2_CID_CAMERA_CLASS_BASE+25)
++enum v4l2_exposure_metering {
++	V4L2_EXPOSURE_METERING_AVERAGE		= 0,
++	V4L2_EXPOSURE_METERING_CENTER_WEIGHTED	= 1,
++	V4L2_EXPOSURE_METERING_SPOT		= 2,
++};
++
++#define V4L2_CID_AUTO_FOCUS_START		(V4L2_CID_CAMERA_CLASS_BASE+28)
++#define V4L2_CID_AUTO_FOCUS_STOP		(V4L2_CID_CAMERA_CLASS_BASE+29)
++#define V4L2_CID_AUTO_FOCUS_STATUS		(V4L2_CID_CAMERA_CLASS_BASE+30)
++#define V4L2_AUTO_FOCUS_STATUS_IDLE		(0 << 0)
++#define V4L2_AUTO_FOCUS_STATUS_BUSY		(1 << 0)
++#define V4L2_AUTO_FOCUS_STATUS_REACHED		(1 << 1)
++#define V4L2_AUTO_FOCUS_STATUS_FAILED		(1 << 2)
++
++#define V4L2_CID_AUTO_FOCUS_RANGE		(V4L2_CID_CAMERA_CLASS_BASE+31)
++enum v4l2_auto_focus_range {
++	V4L2_AUTO_FOCUS_RANGE_AUTO		= 0,
++	V4L2_AUTO_FOCUS_RANGE_NORMAL		= 1,
++	V4L2_AUTO_FOCUS_RANGE_MACRO		= 2,
++	V4L2_AUTO_FOCUS_RANGE_INFINITY		= 3,
++};
++
++#define V4L2_CID_AUTO_EXPOSURE_BIAS		(V4L2_CID_CAMERA_CLASS_BASE+19)
++
++#define V4L2_CID_SCENE_MODE			(V4L2_CID_CAMERA_CLASS_BASE+26)
++enum v4l2_scene_mode {
++	V4L2_SCENE_MODE_NONE			= 0,
++	V4L2_SCENE_MODE_BACKLIGHT		= 1,
++	V4L2_SCENE_MODE_BEACH_SNOW		= 2,
++	V4L2_SCENE_MODE_CANDLE_LIGHT		= 3,
++	V4L2_SCENE_MODE_DAWN_DUSK		= 4,
++	V4L2_SCENE_MODE_FALL_COLORS		= 5,
++	V4L2_SCENE_MODE_FIREWORKS		= 6,
++	V4L2_SCENE_MODE_LANDSCAPE		= 7,
++	V4L2_SCENE_MODE_NIGHT			= 8,
++	V4L2_SCENE_MODE_PARTY_INDOOR		= 9,
++	V4L2_SCENE_MODE_PORTRAIT		= 10,
++	V4L2_SCENE_MODE_SPORTS			= 11,
++	V4L2_SCENE_MODE_SUNSET			= 12,
++	V4L2_SCENE_MODE_TEXT			= 13,
++};
++
++#define V4L2_CID_WIDE_DYNAMIC_RANGE		(V4L2_CID_CAMERA_CLASS_BASE+21)
++#define V4L2_CID_IMAGE_STABILIZATION		(V4L2_CID_CAMERA_CLASS_BASE+22)
++
+ /* FM Modulator class control IDs */
+ #define V4L2_CID_FM_TX_CLASS_BASE		(V4L2_CTRL_CLASS_FM_TX | 0x900)
+ #define V4L2_CID_FM_TX_CLASS			(V4L2_CTRL_CLASS_FM_TX | 1)
+diff -X dontdiff -Nuarb a/drivers/media/video/v4l2-ctrls.c b/drivers/media/video/v4l2-ctrls.c
+--- a/drivers/media/video/v4l2-ctrls.c	2016-01-10 18:03:07.406454693 -0500
++++ b/drivers/media/video/v4l2-ctrls.c	2016-01-10 17:09:01.372280841 -0500
+@@ -230,6 +230,19 @@
+ 		"Aperture Priority Mode",
+ 		NULL
+ 	};
++	static const char * const camera_exposure_metering[] = {
++		"Average",
++		"Center Weighted",
++		"Spot",
++		NULL
++	};
++	static const char * const camera_auto_focus_range[] = {
++		"Auto",
++		"Normal",
++		"Macro",
++		"Infinity",
++		NULL
++	};
+ 	static const char * const colorfx[] = {
+ 		"None",
+ 		"Black & White",
+@@ -243,6 +256,41 @@
+ 		"Vivid",
+ 		NULL
+ 	};
++	static const char * const auto_n_preset_white_balance[] = {
++		"Manual",
++		"Auto",
++		"Incandescent",
++		"Fluorescent",
++		"Fluorescent H",
++		"Horizon",
++		"Daylight",
++		"Flash",
++		"Cloudy",
++		"Shade",
++		NULL,
++	};
++	static const char * const camera_iso_sensitivity_auto[] = {
++		"Manual",
++		"Auto",
++		NULL
++	};
++	static const char * const scene_mode[] = {
++		"None",
++		"Backlight",
++		"Beach/Snow",
++		"Candle Light",
++		"Dusk/Dawn",
++		"Fall Colors",
++		"Fireworks",
++		"Landscape",
++		"Night",
++		"Party/Indoor",
++		"Portrait",
++		"Sports",
++		"Sunset",
++		"Text",
++		NULL
++	};
+ 	static const char * const tune_preemphasis[] = {
+ 		"No Preemphasis",
+ 		"50 Microseconds",
+@@ -354,6 +402,12 @@
+ 		NULL,
+ 	};
+ 
++	static const char * const vpx_golden_frame_sel[] = {
++		"Use Previous Frame",
++		"Use Previous Specific Frame",
++		NULL,
++	};
++
+ 	static const char * const flash_led_mode[] = {
+ 		"Off",
+ 		"Flash",
+@@ -421,8 +475,18 @@
+ 		return camera_power_line_frequency;
+ 	case V4L2_CID_EXPOSURE_AUTO:
+ 		return camera_exposure_auto;
++	case V4L2_CID_EXPOSURE_METERING:
++		return camera_exposure_metering;
++	case V4L2_CID_AUTO_FOCUS_RANGE:
++		return camera_auto_focus_range;
+ 	case V4L2_CID_COLORFX:
+ 		return colorfx;
++	case V4L2_CID_AUTO_N_PRESET_WHITE_BALANCE:
++		return auto_n_preset_white_balance;
++	case V4L2_CID_ISO_SENSITIVITY_AUTO:
++		return camera_iso_sensitivity_auto;
++	case V4L2_CID_SCENE_MODE:
++		return scene_mode;
+ 	case V4L2_CID_TUNE_PREEMPHASIS:
+ 		return tune_preemphasis;
+ 	case V4L2_CID_FLASH_LED_MODE:
+@@ -447,6 +511,8 @@
+ 		return mpeg_mpeg4_level;
+ 	case V4L2_CID_MPEG_VIDEO_MPEG4_PROFILE:
+ 		return mpeg4_profile;
++	case V4L2_CID_MPEG_VIDEO_VPX_GOLDEN_FRAME_SEL:
++		return vpx_golden_frame_sel;
+ 	case V4L2_CID_JPEG_CHROMA_SUBSAMPLING:
+ 		return jpeg_chroma_subsampling;
+ 	case V4L2_CID_MPEG_VIDC_VIDEO_INTRA_REFRESH_MODE:
+@@ -457,6 +523,32 @@
+ }
+ EXPORT_SYMBOL(v4l2_ctrl_get_menu);
+ 
++#define __v4l2_qmenu_int_len(arr, len) ({ *(len) = ARRAY_SIZE(arr); arr; })
++ /*
++ * Returns NULL or an s64 type array containing the menu for given
++ * control ID. The total number of the menu items is returned in @len.
++ */
++const s64 *v4l2_ctrl_get_int_menu(u32 id, u32 *len)
++{
++        static const s64 qmenu_int_vpx_num_partitions[] = {
++                1, 2, 4, 8,
++        };
++
++        static const s64 qmenu_int_vpx_num_ref_frames[] = {
++                1, 2, 3,
++        };
++
++        switch (id) {
++        case V4L2_CID_MPEG_VIDEO_VPX_NUM_PARTITIONS:
++                return __v4l2_qmenu_int_len(qmenu_int_vpx_num_partitions, len);
++        case V4L2_CID_MPEG_VIDEO_VPX_NUM_REF_FRAMES:
++                return __v4l2_qmenu_int_len(qmenu_int_vpx_num_ref_frames, len);
++        default:
++                *len = 0;
++                return NULL;
++        }
++}
++
+ /* Return the control name. */
+ const char *v4l2_ctrl_get_name(u32 id)
+ {
+@@ -506,9 +598,11 @@
+ 	case V4L2_CID_MIN_BUFFERS_FOR_OUTPUT:	return "Min Number of Output Buffers";
+ 	case V4L2_CID_ALPHA_COMPONENT:		return "Alpha Component";
+ 
+-	/* MPEG controls */
++	/* Codec controls */
++	/* The MPEG controls are applicable to all codec controls
++	 * and the 'MPEG' part of the define is historical */
+ 	/* Keep the order of the 'case's the same as in videodev2.h! */
+-	case V4L2_CID_MPEG_CLASS:		return "MPEG Encoder Controls";
++	case V4L2_CID_MPEG_CLASS:		return "Codec Controls";
+ 	case V4L2_CID_MPEG_STREAM_TYPE:		return "Stream Type";
+ 	case V4L2_CID_MPEG_STREAM_PID_PMT:	return "Stream PMT Program ID";
+ 	case V4L2_CID_MPEG_STREAM_PID_AUDIO:	return "Stream Audio Program ID";
+@@ -589,6 +683,7 @@
+ 	case V4L2_CID_MPEG_VIDEO_VBV_SIZE:			return "VBV Buffer Size";
+ 	case V4L2_CID_MPEG_VIDEO_DEC_PTS:			return "Video Decoder PTS";
+ 	case V4L2_CID_MPEG_VIDEO_DEC_FRAME:			return "Video Decoder Frame Count";
++	case V4L2_CID_MPEG_VIDEO_VBV_DELAY:                     return "Initial Delay for VBV Control";
+ 	case V4L2_CID_MPEG_VIDC_VIDEO_ROTATION: return "Rotation";
+ 	case V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL: return "Rate Control";
+ 	case V4L2_CID_MPEG_VIDC_VIDEO_H264_CABAC_MODEL: return "CABAC Model";
+@@ -602,6 +697,15 @@
+ 	case V4L2_CID_MPEG_VIDC_VIDEO_DEINTERLACE:
+ 		return "Deinterlace for encoder";
+ 
++	/* VPX controls */
++	case V4L2_CID_MPEG_VIDEO_VPX_NUM_PARTITIONS:		return "VPX Number of Partitions";
++	case V4L2_CID_MPEG_VIDEO_VPX_IMD_DISABLE_4X4:		return "VPX Intra Mode Decision Disable";
++	case V4L2_CID_MPEG_VIDEO_VPX_NUM_REF_FRAMES:		return "VPX No. of Refs for P Frame";
++	case V4L2_CID_MPEG_VIDEO_VPX_FILTER_LEVEL:		return "VPX Loop Filter Level Range";
++	case V4L2_CID_MPEG_VIDEO_VPX_FILTER_SHARPNESS:		return "VPX Deblocking Effect Control";
++	case V4L2_CID_MPEG_VIDEO_VPX_GOLDEN_FRAME_REF_PERIOD:	return "VPX Golden Frame Refresh Period";
++	case V4L2_CID_MPEG_VIDEO_VPX_GOLDEN_FRAME_SEL:		return "VPX Golden Frame Indicator";
++
+ 	/* CAMERA controls */
+ 	/* Keep the order of the 'case's the same as in videodev2.h! */
+ 	case V4L2_CID_CAMERA_CLASS:		return "Camera Controls";
+@@ -616,13 +720,26 @@
+ 	case V4L2_CID_TILT_ABSOLUTE:		return "Tilt, Absolute";
+ 	case V4L2_CID_FOCUS_ABSOLUTE:		return "Focus, Absolute";
+ 	case V4L2_CID_FOCUS_RELATIVE:		return "Focus, Relative";
+-	case V4L2_CID_FOCUS_AUTO:		return "Focus, Automatic";
++	case V4L2_CID_FOCUS_AUTO:		return "Focus, Automatic Continuous";
+ 	case V4L2_CID_ZOOM_ABSOLUTE:		return "Zoom, Absolute";
+ 	case V4L2_CID_ZOOM_RELATIVE:		return "Zoom, Relative";
+ 	case V4L2_CID_ZOOM_CONTINUOUS:		return "Zoom, Continuous";
+ 	case V4L2_CID_PRIVACY:			return "Privacy";
+ 	case V4L2_CID_IRIS_ABSOLUTE:		return "Iris, Absolute";
+ 	case V4L2_CID_IRIS_RELATIVE:		return "Iris, Relative";
++	case V4L2_CID_ISO_SENSITIVITY:		return "ISO Sensitivity";
++	case V4L2_CID_ISO_SENSITIVITY_AUTO:	return "ISO Sensitivity, Auto";
++	case V4L2_CID_EXPOSURE_METERING:	return "Exposure, Metering Mode";
++	case V4L2_CID_AUTO_EXPOSURE_BIAS:	return "Auto Exposure, Bias";
++	case V4L2_CID_WIDE_DYNAMIC_RANGE:	return "Wide Dynamic Range";
++	case V4L2_CID_IMAGE_STABILIZATION:	return "Image Stabilization";
++	case V4L2_CID_SCENE_MODE:		return "Scene Mode";
++	case V4L2_CID_AUTO_N_PRESET_WHITE_BALANCE: return "White Balance, Auto & Preset";
++	case V4L2_CID_3A_LOCK:			return "3A Lock";
++	case V4L2_CID_AUTO_FOCUS_START:		return "Auto Focus, Start";
++	case V4L2_CID_AUTO_FOCUS_STOP:		return "Auto Focus, Stop";
++	case V4L2_CID_AUTO_FOCUS_STATUS:	return "Auto Focus, Status";
++	case V4L2_CID_AUTO_FOCUS_RANGE:		return "Auto Focus, Range";
+ 
+ 	/* FM Radio Modulator control */
+ 	/* Keep the order of the 'case's the same as in videodev2.h! */
+@@ -714,6 +831,8 @@
+ 	case V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM:
+ 	case V4L2_CID_MPEG_VIDEO_H264_VUI_SAR_ENABLE:
+ 	case V4L2_CID_MPEG_VIDEO_MPEG4_QPEL:
++	case V4L2_CID_WIDE_DYNAMIC_RANGE:
++	case V4L2_CID_IMAGE_STABILIZATION:
+ 		*type = V4L2_CTRL_TYPE_BOOLEAN;
+ 		*min = 0;
+ 		*max = *step = 1;
+@@ -722,6 +841,8 @@
+ 	case V4L2_CID_TILT_RESET:
+ 	case V4L2_CID_FLASH_STROBE:
+ 	case V4L2_CID_FLASH_STROBE_STOP:
++	case V4L2_CID_AUTO_FOCUS_START:
++	case V4L2_CID_AUTO_FOCUS_STOP:
+ 		*type = V4L2_CTRL_TYPE_BUTTON;
+ 		*flags |= V4L2_CTRL_FLAG_WRITE_ONLY;
+ 		*min = *max = *step = *def = 0;
+@@ -745,7 +866,9 @@
+ 	case V4L2_CID_MPEG_STREAM_TYPE:
+ 	case V4L2_CID_MPEG_STREAM_VBI_FMT:
+ 	case V4L2_CID_EXPOSURE_AUTO:
++	case V4L2_CID_AUTO_FOCUS_RANGE:
+ 	case V4L2_CID_COLORFX:
++	case V4L2_CID_AUTO_N_PRESET_WHITE_BALANCE:
+ 	case V4L2_CID_TUNE_PREEMPHASIS:
+ 	case V4L2_CID_FLASH_LED_MODE:
+ 	case V4L2_CID_FLASH_STROBE_SOURCE:
+@@ -759,15 +882,25 @@
+ 	case V4L2_CID_MPEG_VIDEO_MPEG4_LEVEL:
+ 	case V4L2_CID_MPEG_VIDEO_MPEG4_PROFILE:
+ 	case V4L2_CID_JPEG_CHROMA_SUBSAMPLING:
++	case V4L2_CID_ISO_SENSITIVITY_AUTO:
++	case V4L2_CID_EXPOSURE_METERING:
++	case V4L2_CID_SCENE_MODE:
+ 	case V4L2_CID_MPEG_VIDC_VIDEO_ROTATION:
+ 	case V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL:
+ 	case V4L2_CID_MPEG_VIDC_VIDEO_H264_CABAC_MODEL:
++        case V4L2_CID_MPEG_VIDEO_VPX_GOLDEN_FRAME_SEL:
+ 		*type = V4L2_CTRL_TYPE_MENU;
+ 		break;
+ 	case V4L2_CID_RDS_TX_PS_NAME:
+ 	case V4L2_CID_RDS_TX_RADIO_TEXT:
+ 		*type = V4L2_CTRL_TYPE_STRING;
+ 		break;
++	case V4L2_CID_ISO_SENSITIVITY:
++	case V4L2_CID_AUTO_EXPOSURE_BIAS:
++	case V4L2_CID_MPEG_VIDEO_VPX_NUM_PARTITIONS:
++	case V4L2_CID_MPEG_VIDEO_VPX_NUM_REF_FRAMES:
++		*type = V4L2_CTRL_TYPE_INTEGER_MENU;
++		break;
+ 	case V4L2_CID_USER_CLASS:
+ 	case V4L2_CID_CAMERA_CLASS:
+ 	case V4L2_CID_MPEG_CLASS:
+@@ -793,6 +926,8 @@
+ 		break;
+ 	case V4L2_CID_FLASH_FAULT:
+ 	case V4L2_CID_JPEG_ACTIVE_MARKER:
++	case V4L2_CID_3A_LOCK:
++	case V4L2_CID_AUTO_FOCUS_STATUS:
+ 		*type = V4L2_CTRL_TYPE_BITMASK;
+ 		break;
+ 	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+@@ -866,6 +1001,7 @@
+ 		*flags |= V4L2_CTRL_FLAG_WRITE_ONLY;
+ 		break;
+ 	case V4L2_CID_FLASH_STROBE_STATUS:
++	case V4L2_CID_AUTO_FOCUS_STATUS:
+ 	case V4L2_CID_FLASH_READY:
+ 		*flags |= V4L2_CTRL_FLAG_READ_ONLY;
+ 		break;
+diff -X dontdiff -Nuarb a/include/linux/v4l2-mediabus.h b/include/linux/v4l2-mediabus.h
+--- a/include/linux/v4l2-mediabus.h	2016-01-10 21:44:57.826167577 -0500
++++ b/include/linux/v4l2-mediabus.h	2016-01-10 22:02:12.904223014 -0500
+@@ -46,6 +46,7 @@
+ 	V4L2_MBUS_FMT_BGR565_2X8_LE = 0x1006,
+ 	V4L2_MBUS_FMT_RGB565_2X8_BE = 0x1007,
+ 	V4L2_MBUS_FMT_RGB565_2X8_LE = 0x1008,
++	V4L2_MBUS_FMT_ARGB8888_1X32 = 0x100d,
+ 
+ 	/* YUV (including grey) - next is 0x2014 */
+ 	V4L2_MBUS_FMT_Y8_1X8 = 0x2001,
+@@ -67,6 +68,7 @@
+ 	V4L2_MBUS_FMT_YVYU8_1X16 = 0x2012,
+ 	V4L2_MBUS_FMT_YUYV10_1X20 = 0x200d,
+ 	V4L2_MBUS_FMT_YVYU10_1X20 = 0x200e,
++	V4L2_MBUS_FMT_AYUV8_1X32 = 0x2017,
+ 
+ 	/* Bayer - next is 0x3015 */
+ 	V4L2_MBUS_FMT_SBGGR8_1X8 = 0x3001,

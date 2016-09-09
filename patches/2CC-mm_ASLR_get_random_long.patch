@@ -1,0 +1,104 @@
+From 445dfc4c21b488f16e65ad61b4cb7ca7a05a7d50 Mon Sep 17 00:00:00 2001
+From: dcashman <dcashman@google.com>
+Date: Wed, 24 Feb 2016 13:31:22 -0800
+Subject: [PATCH] BACKPORT: FROMLIST: mm: ASLR: use get_random_long()
+
+(cherry picked from commit https://lkml.org/lkml/2016/2/4/833)
+
+Replace calls to get_random_int() followed by a cast to (unsigned long)
+with calls to get_random_long().  Also address shifting bug which, in case
+of x86 removed entropy mask for mmap_rnd_bits values > 31 bits.
+
+Bug: 26963541
+Change-Id: I0743db4fa09074a26230678bad5acf11ab986c2a
+Signed-off-by: Daniel Cashman <dcashman@android.com>
+Signed-off-by: Daniel Cashman <dcashman@google.com>
+---
+ arch/arm/mm/mmap.c               | 2 +-
+ arch/arm64/mm/mmap.c             | 4 ++--
+ arch/mips/mm/mmap.c              | 4 ++--
+ arch/powerpc/kernel/process.c    | 4 ++--
+ arch/powerpc/mm/mmap_64.c        | 4 ++--
+ arch/sparc/kernel/sys_sparc_64.c | 2 +-
+ 7 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/arch/arm/mm/mmap.c b/arch/arm/mm/mmap.c
+index 2761c86..0a23581 100644
+--- a/arch/arm/mm/mmap.c
++++ b/arch/arm/mm/mmap.c
+@@ -175,7 +175,7 @@ void arch_pick_mmap_layout(struct mm_struct *mm)
+ 
+ 	if ((current->flags & PF_RANDOMIZE) &&
+ 	    !(current->personality & ADDR_NO_RANDOMIZE))
+-		random_factor = (get_random_int() & ((1 << mmap_rnd_bits) - 1)) << PAGE_SHIFT;
++		random_factor = (get_random_long() & ((1UL << mmap_rnd_bits) - 1)) << PAGE_SHIFT;
+ 
+ 	if (mmap_is_legacy()) {
+ 		mm->mmap_base = TASK_UNMAPPED_BASE + random_factor;
+diff --git a/arch/mips/mm/mmap.c b/arch/mips/mm/mmap.c
+index 7e5fe27..358820b 100644
+--- a/arch/mips/mm/mmap.c
++++ b/arch/mips/mm/mmap.c
+@@ -147,7 +147,7 @@ void arch_pick_mmap_layout(struct mm_struct *mm)
+ 	unsigned long random_factor = 0UL;
+ 
+ 	if (current->flags & PF_RANDOMIZE) {
+-		random_factor = get_random_int();
++		random_factor = get_random_long();
+ 		random_factor = random_factor << PAGE_SHIFT;
+ 		if (TASK_IS_32BIT_ADDR)
+ 			random_factor &= 0xfffffful;
+@@ -168,7 +168,7 @@ void arch_pick_mmap_layout(struct mm_struct *mm)
+ 
+ static inline unsigned long brk_rnd(void)
+ {
+-	unsigned long rnd = get_random_int();
++	unsigned long rnd = get_random_long();
+ 
+ 	rnd = rnd << PAGE_SHIFT;
+ 	/* 8MB for 32bit, 256MB for 64bit */
+diff --git a/arch/powerpc/kernel/process.c b/arch/powerpc/kernel/process.c
+index 1e1c995..4bfbc85 100644
+--- a/arch/powerpc/kernel/process.c
++++ b/arch/powerpc/kernel/process.c
+@@ -1440,9 +1440,9 @@ static inline unsigned long brk_rnd(void)
+ 
+ 	/* 8MB for 32bit, 1GB for 64bit */
+ 	if (is_32bit_task())
+-		rnd = (long)(get_random_int() % (1<<(23-PAGE_SHIFT)));
++		rnd = (get_random_long() % (1UL<<(23-PAGE_SHIFT)));
+ 	else
+-		rnd = (long)(get_random_int() % (1<<(30-PAGE_SHIFT)));
++		rnd = (get_random_long() % (1UL<<(30-PAGE_SHIFT)));
+ 
+ 	return rnd << PAGE_SHIFT;
+ }
+diff --git a/arch/powerpc/mm/mmap_64.c b/arch/powerpc/mm/mmap_64.c
+index 67a42ed..2803d90 100644
+--- a/arch/powerpc/mm/mmap_64.c
++++ b/arch/powerpc/mm/mmap_64.c
+@@ -60,9 +60,9 @@ static unsigned long mmap_rnd(void)
+ 	if (current->flags & PF_RANDOMIZE) {
+ 		/* 8MB for 32bit, 1GB for 64bit */
+ 		if (is_32bit_task())
+-			rnd = (long)(get_random_int() % (1<<(23-PAGE_SHIFT)));
++			rnd = get_random_long() % (1<<(23-PAGE_SHIFT));
+ 		else
+-			rnd = (long)(get_random_int() % (1<<(30-PAGE_SHIFT)));
++			rnd = get_random_long() % (1UL<<(30-PAGE_SHIFT));
+ 	}
+ 	return rnd << PAGE_SHIFT;
+ }
+diff --git a/arch/sparc/kernel/sys_sparc_64.c b/arch/sparc/kernel/sys_sparc_64.c
+index 2daaaa6..1e9e320 100644
+--- a/arch/sparc/kernel/sys_sparc_64.c
++++ b/arch/sparc/kernel/sys_sparc_64.c
+@@ -265,7 +265,7 @@ static unsigned long mmap_rnd(void)
+ 	unsigned long rnd = 0UL;
+ 
+ 	if (current->flags & PF_RANDOMIZE) {
+-		unsigned long val = get_random_int();
++		unsigned long val = get_random_long();
+ 		if (test_thread_flag(TIF_32BIT))
+ 			rnd = (val % (1UL << (23UL-PAGE_SHIFT)));
+ 		else

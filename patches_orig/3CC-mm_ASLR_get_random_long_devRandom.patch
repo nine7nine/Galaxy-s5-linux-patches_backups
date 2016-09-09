@@ -1,0 +1,82 @@
+From 45281884b90bf0e299f71ca56457e21ac5863354 Mon Sep 17 00:00:00 2001
+From: dcashman <dcashman@google.com>
+Date: Wed, 24 Feb 2016 13:27:06 -0800
+Subject: [PATCH] FROMLIST: drivers: char: random: add get_random_long()
+
+(cherry picked from commit https://lkml.org/lkml/2016/2/4/831)
+
+d07e22597d1d355 ("mm: mmap: add new /proc tunable for mmap_base ASLR")
+added the ability to choose from a range of values to use for entropy
+count in generating the random offset to the mmap_base address.  The
+maximum value on this range was set to 32 bits for 64-bit x86 systems, but
+this value could be increased further, requiring more than the 32 bits of
+randomness provided by get_random_int(), as is already possible for arm64.
+Add a new function: get_random_long() which more naturally fits with the
+mmap usage of get_random_int() but operates exactly the same as
+get_random_int().
+
+Also, fix the shifting constant in mmap_rnd() to be an unsigned long so
+that values greater than 31 bits generate an appropriate mask without
+overflow.  This is especially important on x86, as its shift instruction
+uses a 5-bit mask for the shift operand, which meant that any value for
+mmap_rnd_bits over 31 acts as a no-op and effectively disables mmap_base
+randomization.
+
+Finally, replace calls to get_random_int() with get_random_long() where
+appropriate.
+
+Bug: 26963541
+Signed-off-by: Daniel Cashman <dcashman@android.com>
+Signed-off-by: Daniel Cashman <dcashman@google.com>
+Change-Id: Ie7552631b5db86f3482cf15e7dc916d89c1c502b
+---
+ drivers/char/random.c  | 22 ++++++++++++++++++++++
+ include/linux/random.h |  1 +
+ 2 files changed, 23 insertions(+)
+
+diff --git a/drivers/char/random.c b/drivers/char/random.c
+index c462191..0b1cb7e 100644
+--- a/drivers/char/random.c
++++ b/drivers/char/random.c
+@@ -1371,6 +1371,28 @@ unsigned int get_random_int(void)
+ }
+ 
+ /*
++ * Same as get_random_int(), but returns unsigned long.
++ */
++unsigned long get_random_long(void)
++{
++	__u32 *hash;
++	unsigned long ret;
++
++	if (arch_get_random_long(&ret))
++		return ret;
++
++	hash = get_cpu_var(get_random_int_hash);
++
++	hash[0] += current->pid + jiffies + get_cycles();
++	md5_transform(hash, random_int_secret);
++	ret = *(unsigned long *)hash;
++	put_cpu_var(get_random_int_hash);
++
++	return ret;
++}
++EXPORT_SYMBOL(get_random_long);
++
++/*
+  * randomize_range() returns a start address such that
+  *
+  *    [...... <range> .....]
+diff --git a/include/linux/random.h b/include/linux/random.h
+index 8f74538..7d324a2 100644
+--- a/include/linux/random.h
++++ b/include/linux/random.h
+@@ -62,6 +62,7 @@ extern const struct file_operations random_fops, urandom_fops;
+ #endif
+ 
+ unsigned int get_random_int(void);
++unsigned long get_random_long(void);
+ unsigned long randomize_range(unsigned long start, unsigned long end, unsigned long len);
+ 
+ u32 random32(void);
+
