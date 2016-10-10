@@ -1,10 +1,18 @@
 # Galaxy-s5-linux-patches_backups
 
-some backups of patchwork for my Galaxy s5/klte, in various stages. 
+Old backups of patchwork for my Galaxy s5/klte for CM13, in various stages. 
 
 These patches won't apply (in full, using the 'patchkernel.sh' script), over CM13/KLTE sources because my local kernel
-is forked and has Samsung linux kernel/klte code drops that Cyanogenmod chose to not include. From both loppilop and Marshmallow.
+was forked and has Samsung linux kernel/klte code drops that Cyanogenmod chose to not include. 
 
-many of the patches are backporting features not found in linux-3.4, which I wanted or am testing.
+# NOTE: 
 
-I will probably publish my kernel sources at some point, but this repo is really just a backup for me!
+* Do not use this repo, as I am not maintaining this branch (cm-13) anymore.
+
+* My Cm14/klte patchwork can be found here:
+
+https://github.com/nine7nine/CM-14-Android-7.0-Extras/tree/master/android_kernel_samsung_klte
+
+* The randomized mac address patch requires support in aosp/cm14 builds, more info;
+
+https://github.com/nine7nine/CM-14-Android-7.0-Extras
